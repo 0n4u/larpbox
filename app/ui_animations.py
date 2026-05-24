@@ -30,6 +30,19 @@ def _opacity_effect(widget: QWidget, opacity: float) -> QGraphicsOpacityEffect:
     return effect
 
 
+def _ancestor_has_fade(widget: QWidget) -> bool:
+    parent = widget.parentWidget()
+    while parent is not None:
+        if getattr(parent, '_fade_animation', None) is not None:
+            return True
+        if getattr(parent, '_pulse_animation', None) is not None:
+            return True
+        if isinstance(parent.graphicsEffect(), QGraphicsOpacityEffect):
+            return True
+        parent = parent.parentWidget()
+    return False
+
+
 def fade_in_widget(
     widget: QWidget,
     *,
@@ -42,32 +55,33 @@ def fade_in_widget(
     if widget is None:
         return None
 
-    _stop_fade(widget)
-    effect = _opacity_effect(widget, start_opacity)
-    anim = QPropertyAnimation(effect, b'opacity', widget)
-    anim.setDuration(duration)
-    anim.setStartValue(start_opacity)
-    anim.setEndValue(end_opacity)
-    anim.setEasingCurve(easing)
+    def _begin() -> QPropertyAnimation | None:
+        if widget is None or _ancestor_has_fade(widget):
+            return None
 
-    def _cleanup() -> None:
-        if getattr(widget, '_fade_animation', None) is anim:
-            widget._fade_animation = None
-        widget.setGraphicsEffect(None)
+        _stop_fade(widget)
+        effect = _opacity_effect(widget, start_opacity)
+        anim = QPropertyAnimation(effect, b'opacity', widget)
+        anim.setDuration(duration)
+        anim.setStartValue(start_opacity)
+        anim.setEndValue(end_opacity)
+        anim.setEasingCurve(easing)
 
-    anim.finished.connect(_cleanup)
+        def _cleanup() -> None:
+            if getattr(widget, '_fade_animation', None) is anim:
+                widget._fade_animation = None
+            widget.setGraphicsEffect(None)
 
-    def start() -> None:
-        if getattr(widget, '_fade_animation', None) is not anim:
-            return
+        anim.finished.connect(_cleanup)
+        widget._fade_animation = anim
         anim.start()
+        return anim
 
-    widget._fade_animation = anim
     if delay_ms > 0:
-        QTimer.singleShot(delay_ms, start)
+        QTimer.singleShot(delay_ms, _begin)
     else:
-        start()
-    return anim
+        QTimer.singleShot(0, _begin)
+    return None
 
 
 def fade_out_widget(
@@ -199,7 +213,7 @@ def pulse_widget(
     min_opacity: float = 0.42,
     max_opacity: float = 1.0,
 ) -> QPropertyAnimation | None:
-    if widget is None:
+    if widget is None or _ancestor_has_fade(widget):
         return None
 
     pulse = getattr(widget, '_pulse_animation', None)
@@ -217,7 +231,7 @@ def pulse_widget(
     anim.setEasingCurve(QEasingCurve.Type.InOutSine)
     anim.setLoopCount(-1)
     widget._pulse_animation = anim
-    anim.start()
+    QTimer.singleShot(0, anim.start)
     return anim
 
 

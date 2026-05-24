@@ -49,6 +49,7 @@ _BADGE_ICON = 12
 _POPULATE_BATCH = 10
 _POPULATE_INTERVAL_MS = 32
 _OFFLINE_HIDE_THRESHOLD = 100
+_FORCE_CLONE_TIMEOUT_SEC = 25.0
 
 
 class FriendsWorker(QThread):
@@ -457,6 +458,7 @@ class FriendsListPanel(QWidget):
                     display_name=detail or None,
                 ),
                 'Avatar selected — switch applies in VRChat.',
+                timeout_sec=_FORCE_CLONE_TIMEOUT_SEC,
             )
             self._action_worker.finished_ok.connect(self._on_action_ok)
             self._action_worker.finished_error.connect(self._on_action_error)

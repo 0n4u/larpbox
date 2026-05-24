@@ -249,6 +249,7 @@ class PresetConfigUI(QWidget):
             animation.setEasingCurve(QEasingCurve.Type.OutQuart)
             animation.start()
             self._fade_animation = animation
+            panel_base_delay_ms = 320
             panel_stagger = (
                 (self.avatar_search.container, 40),
                 (self.friends_list.frame, 70),
@@ -258,7 +259,7 @@ class PresetConfigUI(QWidget):
                 (self.preview_container, 160),
             )
             for widget, delay_ms in panel_stagger:
-                pop_in_widget(widget, duration=300, delay_ms=delay_ms)
+                pop_in_widget(widget, duration=300, delay_ms=panel_base_delay_ms + delay_ms)
 
     def start_timers(self):
         self.placeholder_timer = QTimer()

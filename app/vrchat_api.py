@@ -45,6 +45,12 @@ logger = get_logger('vrchat_api')
 
 AVTRDB_SEARCH_URL = 'https://api.avtrdb.com/v3/avatar/search/vrcx'
 REQUI_SEARCH_BASE = 'https://requi.dev/vrcx_search.php'
+AVATAR_RECOVERY_SEARCH_BASE = 'https://api.avatarrecovery.com/Avatar/vrcx'
+_VRCX_AVATAR_PROVIDER_URLS = (
+    AVTRDB_SEARCH_URL,
+    AVATAR_RECOVERY_SEARCH_BASE,
+    REQUI_SEARCH_BASE,
+)
 _ALT_HTTPS_PORTS = (2053, 8443)
 DEFAULT_AVATAR_FAVORITE_GROUP = 'avatars1'
 _INSTANCE_SUMMARY_CACHE: dict[str, tuple[float, str | None, int | None]] = {}
@@ -360,6 +366,79 @@ def _fetch_vrcx_json(url: str) -> list[dict[str, Any]]:
     except Exception:
         logger.debug('Avatar search fetch failed for %s', url, exc_info=True)
         return []
+
+
+def _fetch_vrcx_avatar_object(url: str, *, timeout: float = 12.0) -> dict[str, Any] | None:
+    def _do_fetch() -> dict[str, Any] | None:
+        request = urllib.request.Request(url, headers=_vrcx_headers())
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode('utf-8'))
+        if isinstance(payload, dict):
+            return payload
+        return None
+
+    try:
+        return rate_limited_external_call(_do_fetch)
+    except Exception:
+        logger.debug('Avatar lookup fetch failed for %s', url, exc_info=True)
+        return None
+
+
+def lookup_avatar_by_file_id(base_url: str, file_id: str) -> AvatarResult | None:
+    file_id = file_id.strip()
+    if not file_id:
+        return None
+    params = urllib.parse.urlencode({'fileId': file_id})
+    for url in _vrcx_search_urls(base_url, params):
+        payload = _fetch_vrcx_avatar_object(url)
+        if not payload:
+            continue
+        result = _avatar_from_avtrdb(payload)
+        if result.id.startswith('avtr_'):
+            if url != _vrcx_search_urls(base_url, params)[0]:
+                logger.debug('Avatar fileId lookup succeeded via alternate URL: %s', url)
+            return result
+    return None
+
+
+def lookup_avatars_by_author(base_url: str, author_id: str) -> list[AvatarResult]:
+    author_id = author_id.strip()
+    if not author_id:
+        return []
+    params = urllib.parse.urlencode({'authorId': author_id})
+    for url in _vrcx_search_urls(base_url, params):
+        items = _fetch_vrcx_json(url)
+        if items:
+            results = [_avatar_from_avtrdb(item) for item in items if item.get('id')]
+            if results:
+                if url != _vrcx_search_urls(base_url, params)[0]:
+                    logger.debug('Avatar author lookup succeeded via alternate URL: %s', url)
+                return results
+    return []
+
+
+def lookup_avatar_id_by_image_file_id(author_id: str, file_id: str) -> str | None:
+    """VRCX-style thumbnail file ID resolution (fileId query, then authorId + image match)."""
+    file_id = file_id.strip()
+    if not file_id:
+        return None
+    file_key = file_id.casefold()
+    uuid_key = file_key.replace('file_', '')
+
+    for base_url in _VRCX_AVATAR_PROVIDER_URLS:
+        match = lookup_avatar_by_file_id(base_url, file_id)
+        if match and match.id.startswith('avtr_'):
+            return match.id
+
+    author_id = author_id.strip()
+    if not author_id:
+        return None
+    for base_url in _VRCX_AVATAR_PROVIDER_URLS:
+        for result in lookup_avatars_by_author(base_url, author_id):
+            image_url = (result.image_url or '').casefold()
+            if file_key in image_url or (uuid_key and uuid_key in image_url):
+                return result.id
+    return None
 
 
 def search_avatars_avtrdb(query: str, *, limit: int = 40) -> list[AvatarResult]:
@@ -1458,14 +1537,23 @@ def _resolve_avatar_from_thumbnail_file(
     session: VRChatSession,
     user_id: str,
     file_id: str,
+    *,
+    skip_name_search: bool = False,
 ) -> str | None:
     if _is_robot_placeholder_file_id(file_id):
         return None
+
+    resolved = lookup_avatar_id_by_image_file_id(user_id, file_id)
+    if resolved:
+        return resolved
+
     record = _fetch_vrchat_file_record(session, file_id)
     if record is None:
         return None
     avatar_name = _avatar_name_from_vrchat_file_name(str(record.get('name') or ''))
     if not avatar_name or avatar_name.casefold() in _GENERIC_AVATAR_NAMES:
+        return None
+    if skip_name_search:
         return None
     resolved = _lookup_avatar_id_by_thumbnail_match(
         session,
@@ -1486,6 +1574,8 @@ def _resolve_avatar_id_from_instance_presence(
     session: VRChatSession,
     user_id: str,
     display_name: str | None = None,
+    *,
+    skip_name_search: bool = False,
 ) -> str | None:
     log_players, log_location = log_players_for_current_room()
     in_log = user_id in {player.user_id for player in log_players}
@@ -1533,7 +1623,12 @@ def _resolve_avatar_id_from_instance_presence(
                     or ''
                 )
                 file_id = _file_id_from_vrchat_asset_url(thumbnail_url)
-                resolved = _resolve_avatar_from_thumbnail_file(session, user_id, file_id or '')
+                resolved = _resolve_avatar_from_thumbnail_file(
+                    session,
+                    user_id,
+                    file_id or '',
+                    skip_name_search=skip_name_search,
+                )
                 if resolved:
                     set_cached_avatar_id(user_id, resolved, source='instance')
                     return resolved
@@ -1553,6 +1648,7 @@ def _resolve_avatar_id_from_user_api(
     user_id: str,
     *,
     allow_cached_fallback: bool = True,
+    skip_name_search: bool = False,
 ) -> str | None:
     cached = _AVATAR_RESOLVE_CACHE.get(user_id)
     now = time.monotonic()
@@ -1587,7 +1683,11 @@ def _resolve_avatar_id_from_user_api(
         if cached_id:
             _AVATAR_RESOLVE_CACHE[user_id] = (now, cached_id)
             return cached_id
-        instance_resolved = _resolve_avatar_id_from_instance_presence(session, user_id)
+        instance_resolved = _resolve_avatar_id_from_instance_presence(
+            session,
+            user_id,
+            skip_name_search=skip_name_search,
+        )
         if instance_resolved:
             _AVATAR_RESOLVE_CACHE[user_id] = (now, instance_resolved)
             return instance_resolved
@@ -1595,7 +1695,12 @@ def _resolve_avatar_id_from_user_api(
         return None
 
     if file_id:
-        resolved = _resolve_avatar_from_thumbnail_file(session, user_id, file_id)
+        resolved = _resolve_avatar_from_thumbnail_file(
+            session,
+            user_id,
+            file_id,
+            skip_name_search=skip_name_search,
+        )
 
     if resolved:
         set_cached_avatar_id(user_id, resolved, source='api')
@@ -1629,7 +1734,7 @@ def resolve_player_avatar_id(
     if live_info.avatar_id:
         sync_live_log_avatars({user_id: live_info.avatar_id})
         return live_info.avatar_id
-    if live_info.avatar_name and in_current_room:
+    if live_info.avatar_name and in_current_room and not for_force_clone:
         resolved = lookup_avatar_id_by_name(
             live_info.avatar_name,
             live_info.author_name or None,
@@ -1644,6 +1749,7 @@ def resolve_player_avatar_id(
             session,
             user_id,
             allow_cached_fallback=not for_force_clone,
+            skip_name_search=for_force_clone,
         )
         if api_resolved:
             return api_resolved
@@ -1651,6 +1757,7 @@ def resolve_player_avatar_id(
             session,
             user_id,
             display_name,
+            skip_name_search=for_force_clone,
         )
         if instance_resolved:
             return instance_resolved
@@ -1658,7 +1765,7 @@ def resolve_player_avatar_id(
             return None
 
     if session is not None and in_current_room:
-        if live_info.avatar_name:
+        if live_info.avatar_name and not for_force_clone:
             resolved = lookup_avatar_id_by_name(
                 live_info.avatar_name,
                 live_info.author_name or None,
@@ -1671,6 +1778,7 @@ def resolve_player_avatar_id(
             session,
             user_id,
             display_name,
+            skip_name_search=for_force_clone,
         )
         if instance_resolved:
             return instance_resolved
@@ -1678,6 +1786,7 @@ def resolve_player_avatar_id(
             session,
             user_id,
             allow_cached_fallback=not for_force_clone,
+            skip_name_search=for_force_clone,
         )
         if api_resolved:
             return api_resolved
@@ -1716,6 +1825,21 @@ def force_clone_player_avatar(
 ) -> str:
     if not user_id:
         raise ValueError('User ID is required.')
+
+    def _valid_avatar_id(value: str | None) -> str | None:
+        cleaned = str(value or '').strip()
+        return cleaned if cleaned.startswith('avtr_') else None
+
+    for candidate in (
+        avatar_id,
+        parse_avatar_ids_from_log().get(user_id),
+        get_cached_avatar_id(user_id),
+    ):
+        resolved = _valid_avatar_id(candidate)
+        if resolved:
+            set_cached_avatar_id(user_id, resolved, source='force_clone')
+            return select_avatar(session, resolved)
+
     resolved = resolve_player_avatar_id(
         user_id,
         display_name,

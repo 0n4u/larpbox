@@ -19,7 +19,6 @@ from .logging_setup import get_logger
 from .status_indicator import StatusIndicator
 from .ui_layout import PREVIEW_PANEL_HEIGHT, PREVIEW_PANEL_WIDTH
 from .theme import dark_theme, themed_menu
-from .ui_animations import fade_in_widget, pop_in_widget, stagger_pop_in
 from .vrchat_api import CurrentUserProfile, get_current_user_profile, user_profile_url
 from .vrchat_auth import VRChatSession
 
@@ -314,12 +313,6 @@ class AccountInfoPanel(QWidget):
         bio = _normalize_whitespace(profile.bio) if profile.bio else 'No description'
         self.bio_text.setPlainText(bio)
         self.bio_text.verticalScrollBar().setValue(0)
-        pop_in_widget(self.avatar, duration=280)
-        stagger_pop_in(
-            [self.name_label, self.status_indicator, self.instance_label, self.bio_text],
-            duration=240,
-            step_ms=45,
-        )
 
     def cleanup(self) -> None:
         self._poll_timer.stop()

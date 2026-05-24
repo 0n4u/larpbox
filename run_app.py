@@ -3,7 +3,13 @@ import sys
 from PyQt6.QtCore import QEventLoop
 from PyQt6.QtWidgets import QApplication
 
-from app.logging_setup import get_debug_mode_from_config, get_logger, hide_console, setup_logging, show_console
+from app.logging_setup import (
+    get_debug_mode_from_config,
+    get_logger,
+    hide_console,
+    setup_logging,
+    show_console,
+)
 from app.login_window import LoginWindow
 from app.main_window import PresetConfigUI
 from app.vrchat_auth import VRChatSession, restore_session

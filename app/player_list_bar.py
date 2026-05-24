@@ -42,6 +42,7 @@ _FAST_ENRICH_REQUESTS = 4
 _POPULATE_BATCH = 12
 _POPULATE_INTERVAL_MS = 24
 _API_ENRICH_DELAY_MS = 400
+_FORCE_CLONE_TIMEOUT_SEC = 25.0
 
 PLAYER_LIST_HEIGHT = 200
 
@@ -320,9 +321,13 @@ class PlayerListBar(QWidget):
     def _set_world_label(self, text: str, *, is_error: bool = False) -> None:
         self.world_label.setText(text)
         self.world_label.setToolTip(text if len(text) > 48 else '')
-        self.world_label.setObjectName('worldLabelError' if is_error else 'worldLabel')
-        self.world_label.style().unpolish(self.world_label)
-        self.world_label.style().polish(self.world_label)
+        object_name = 'worldLabelError' if is_error else 'worldLabel'
+        if self.world_label.objectName() != object_name:
+            self.world_label.setObjectName(object_name)
+            self.world_label.style().unpolish(self.world_label)
+            self.world_label.style().polish(self.world_label)
+        else:
+            self.world_label.update()
 
     def _show_instance_menu(self, pos) -> None:
         if self._current_instance is None or not self._current_instance.can_close_instance:
@@ -383,6 +388,7 @@ class PlayerListBar(QWidget):
                     avatar_id=avatar_id,
                 ),
                 'Avatar selected — switch applies in VRChat.',
+                timeout_sec=_FORCE_CLONE_TIMEOUT_SEC,
             )
             self._action_worker.finished_ok.connect(self._on_action_ok)
             self._action_worker.finished_error.connect(self._on_action_error)
