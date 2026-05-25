@@ -4,3 +4,4 @@ psutil>=5.9.0,<6.0.0
 vrchatapi>=1.20.0,<2.0.0
 winrt-Windows.Media.Control>=2.0; sys_platform == "win32"
 winrt-Windows.Foundation>=2.0; sys_platform == "win32"
+pywin32>=306; sys_platform == "win32"
