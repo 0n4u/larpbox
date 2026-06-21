@@ -6,7 +6,7 @@ from .logging_setup import get_logger
 from .title_bar import TitleBar
 from .theme import dark_theme
 from .frameless_chrome import apply_frameless_chrome
-from .ui_animations import pop_in_widget
+from .ui_animations import pop_in_widget, toggle_expand_widget, window_fade_in
 logger = get_logger('settings')
 
 class AvatarApiTestWorker(QThread):
@@ -32,7 +32,8 @@ class SettingsWindow(QWidget):
         self.setWindowTitle('')
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedSize(360, 780)
+        self.setWindowOpacity(0.0)
+        self.setFixedSize(360, 900)
         self.default_settings = DEFAULT_CONFIG.copy()
         self.loading_settings = False
         self.init_ui()
@@ -204,7 +205,7 @@ class SettingsWindow(QWidget):
         panels_desc.setWordWrap(True)
         scroll_layout.addWidget(panels_desc)
         self.show_friends_list_check = QCheckBox('Friends list')
-        self.show_avatar_search_check = QCheckBox('Avatar search')
+        self.show_avatar_search_check = QCheckBox('Avatar tools')
         self.show_player_list_check = QCheckBox('Player list')
         self.show_instance_info_check = QCheckBox('Instance info bar')
         self.show_account_info_check = QCheckBox('Account info')
@@ -216,7 +217,7 @@ class SettingsWindow(QWidget):
         separator5.setFrameShape(QFrame.Shape.HLine)
         separator5.setStyleSheet('background-color: #3a3a3a; max-height: 1px; margin: 6px 0;')
         scroll_layout.addWidget(separator5)
-        avatar_api_label = QLabel('Avatar Search API')
+        avatar_api_label = QLabel('Avatar Tools')
         avatar_api_label.setObjectName('sectionHeader')
         scroll_layout.addWidget(avatar_api_label)
         avatar_api_desc = QLabel('Choose which database to search. Filters in the avatar panel change per API.')
@@ -247,6 +248,38 @@ class SettingsWindow(QWidget):
         separator6.setFrameShape(QFrame.Shape.HLine)
         separator6.setStyleSheet('background-color: #3a3a3a; max-height: 1px; margin: 6px 0;')
         scroll_layout.addWidget(separator6)
+        presence_label = QLabel('Rich Presence')
+        presence_label.setObjectName('sectionHeader')
+        scroll_layout.addWidget(presence_label)
+        self.enable_discord_presence_check = QCheckBox('Discord — show VRChat world (requires pypresence)')
+        scroll_layout.addWidget(self.enable_discord_presence_check)
+        separator6c = QFrame()
+        separator6c.setFrameShape(QFrame.Shape.HLine)
+        separator6c.setStyleSheet('background-color: #3a3a3a; max-height: 1px; margin: 6px 0;')
+        scroll_layout.addWidget(separator6c)
+        app_label = QLabel('Application')
+        app_label.setObjectName('sectionHeader')
+        scroll_layout.addWidget(app_label)
+        self.close_to_tray_check = QCheckBox('Minimize to tray when closing the window')
+        self.close_to_tray_check.setToolTip('Keep larpbox running in the system tray when you close the main window')
+        scroll_layout.addWidget(self.close_to_tray_check)
+        self.enable_hotkeys_check = QCheckBox('Global hotkeys (Ctrl+Alt+1–5)')
+        self.enable_hotkeys_check.setToolTip('Play bound presets while VRChat is running. Set preset names below.')
+        scroll_layout.addWidget(self.enable_hotkeys_check)
+        self._hotkey_inputs: list[QLineEdit] = []
+        for slot in range(1, 6):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(f'Hotkey {slot}:'))
+            field = QLineEdit()
+            field.setPlaceholderText('Preset name (exact match)')
+            field.setToolTip(f'Ctrl+Alt+{slot} plays this preset when VRChat is running')
+            self._hotkey_inputs.append(field)
+            row.addWidget(field, 1)
+            scroll_layout.addLayout(row)
+        separator6b = QFrame()
+        separator6b.setFrameShape(QFrame.Shape.HLine)
+        separator6b.setStyleSheet('background-color: #3a3a3a; max-height: 1px; margin: 6px 0;')
+        scroll_layout.addWidget(separator6b)
         debug_label = QLabel('Debug & Logging')
         debug_label.setObjectName('sectionHeader')
         scroll_layout.addWidget(debug_label)
@@ -295,6 +328,11 @@ class SettingsWindow(QWidget):
         self.show_account_info_check.toggled.connect(self.autosave)
         self.show_chatbox_preview_check.toggled.connect(self.autosave)
         self.show_preset_config_check.toggled.connect(self.autosave)
+        self.enable_discord_presence_check.toggled.connect(self.autosave)
+        self.close_to_tray_check.toggled.connect(self.autosave)
+        self.enable_hotkeys_check.toggled.connect(self.autosave)
+        for field in self._hotkey_inputs:
+            field.textChanged.connect(self.autosave)
         self.avatar_provider_combo.currentIndexChanged.connect(self.autosave)
         self.debug_mode_check.toggled.connect(self.on_debug_mode_changed)
         status_bar = QHBoxLayout()
@@ -321,7 +359,7 @@ class SettingsWindow(QWidget):
     def toggle_secondary_osc(self, enabled):
         if self.loading_settings:
             return
-        self.secondary_frame.setVisible(enabled)
+        toggle_expand_widget(self.secondary_frame, enabled, duration=280)
 
     def test_avatar_apis(self) -> None:
         if self._api_test_worker is not None and self._api_test_worker.isRunning():
@@ -356,14 +394,17 @@ class SettingsWindow(QWidget):
 
     def test_connection(self):
         from pythonosc import udp_client
+        from .osc_connection import OscConnectionTracker
         ip = self.osc_ip_input.text().strip() or '127.0.0.1'
         port = self.osc_port_input.value()
         try:
             client = udp_client.SimpleUDPClient(ip, port)
             client.send_message('/chatbox/input', ['larpbox connection test', True, False])
+            OscConnectionTracker.instance().record_success()
             self.connection_status.setText(f'Test sent to {ip}:{port}')
             self.connection_status.setStyleSheet('font-size: 9pt; margin-left: 5px; color: #88aa88;')
         except Exception as e:
+            OscConnectionTracker.instance().record_failure(str(e))
             self.connection_status.setText(f'Failed: {e}')
             self.connection_status.setStyleSheet('font-size: 9pt; margin-left: 5px; color: #cc6666;')
 
@@ -398,6 +439,11 @@ class SettingsWindow(QWidget):
         self.show_account_info_check.setChecked(get_bool(config.get('show_account_info', True)))
         self.show_chatbox_preview_check.setChecked(get_bool(config.get('show_chatbox_preview', True)))
         self.show_preset_config_check.setChecked(get_bool(config.get('show_preset_config', True)))
+        self.enable_discord_presence_check.setChecked(get_bool(config.get('enable_discord_presence', False)))
+        self.close_to_tray_check.setChecked(get_bool(config.get('close_to_tray', True)))
+        self.enable_hotkeys_check.setChecked(get_bool(config.get('enable_hotkeys', True)))
+        for index, field in enumerate(self._hotkey_inputs, start=1):
+            field.setText(str(config.get(f'hotkey_preset_{index}', '') or ''))
         provider_id = str(config.get('avatar_search_provider', 'avtrdb'))
         provider_index = self.avatar_provider_combo.findData(provider_id)
         if provider_index >= 0:
@@ -435,7 +481,8 @@ class SettingsWindow(QWidget):
         provider_id = self.avatar_provider_combo.currentData()
         apps_raw = self.media_apps_input.text().strip()
         apps = [part.strip() for part in apps_raw.split(',') if part.strip()] if apps_raw else []
-        return {'osc_ip': self.osc_ip_input.text() or '127.0.0.1', 'osc_port': self.osc_port_input.value(), 'insane_egg_mode': self.insane_egg_mode_check.isChecked(), 'wall_of_china': self.wall_of_china_check.isChecked(), 'egg_mode': self.egg_mode_check.isChecked(), 'use_secondary_osc': self.use_secondary_check.isChecked(), 'secondary_osc_ip': self.secondary_ip_input.text() or '127.0.0.1', 'secondary_osc_port': self.secondary_port_input.value(), 'small_delay_time': VRCHAT_CHATBOX_DEFAULT_INTERVAL_MS, 'message_interval': VRCHAT_CHATBOX_DEFAULT_INTERVAL_MS, 'blank_message_interval': VRCHAT_CHATBOX_DEFAULT_INTERVAL_MS, 'enable_media': self.enable_media_check.isChecked(), 'media_format': self.media_format_input.text().strip() or '{title} by {artist}', 'media_allowed_apps': apps, 'debug_mode': self.debug_mode_check.isChecked(), 'show_friends_list': self.show_friends_list_check.isChecked(), 'show_avatar_search': self.show_avatar_search_check.isChecked(), 'show_player_list': self.show_player_list_check.isChecked(), 'show_instance_info': self.show_instance_info_check.isChecked(), 'show_account_info': self.show_account_info_check.isChecked(), 'show_chatbox_preview': self.show_chatbox_preview_check.isChecked(), 'show_preset_config': self.show_preset_config_check.isChecked(), 'avatar_search_provider': provider_id or 'combined'}
+        hotkeys = {f'hotkey_preset_{index}': field.text().strip() for index, field in enumerate(self._hotkey_inputs, start=1)}
+        return {'osc_ip': self.osc_ip_input.text() or '127.0.0.1', 'osc_port': self.osc_port_input.value(), 'insane_egg_mode': self.insane_egg_mode_check.isChecked(), 'wall_of_china': self.wall_of_china_check.isChecked(), 'egg_mode': self.egg_mode_check.isChecked(), 'use_secondary_osc': self.use_secondary_check.isChecked(), 'secondary_osc_ip': self.secondary_ip_input.text() or '127.0.0.1', 'secondary_osc_port': self.secondary_port_input.value(), 'small_delay_time': VRCHAT_CHATBOX_DEFAULT_INTERVAL_MS, 'message_interval': VRCHAT_CHATBOX_DEFAULT_INTERVAL_MS, 'blank_message_interval': VRCHAT_CHATBOX_DEFAULT_INTERVAL_MS, 'enable_media': self.enable_media_check.isChecked(), 'media_format': self.media_format_input.text().strip() or '{title} by {artist}', 'media_allowed_apps': apps, 'debug_mode': self.debug_mode_check.isChecked(), 'show_friends_list': self.show_friends_list_check.isChecked(), 'show_avatar_search': self.show_avatar_search_check.isChecked(), 'show_player_list': self.show_player_list_check.isChecked(), 'show_instance_info': self.show_instance_info_check.isChecked(), 'show_account_info': self.show_account_info_check.isChecked(), 'show_chatbox_preview': self.show_chatbox_preview_check.isChecked(), 'show_preset_config': self.show_preset_config_check.isChecked(), 'enable_discord_presence': self.enable_discord_presence_check.isChecked(), 'close_to_tray': self.close_to_tray_check.isChecked(), 'enable_hotkeys': self.enable_hotkeys_check.isChecked(), **hotkeys, 'avatar_search_provider': provider_id or 'combined'}
 
     def on_debug_mode_changed(self, enabled: bool):
         if not self.loading_settings:
@@ -490,4 +537,5 @@ class SettingsWindow(QWidget):
         apply_frameless_chrome(self)
         if not getattr(self, '_intro_animated', False):
             self._intro_animated = True
-            pop_in_widget(self.container, duration=280)
+            window_fade_in(self, duration=340)
+            pop_in_widget(self.container, duration=300)

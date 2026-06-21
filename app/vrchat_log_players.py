@@ -12,9 +12,11 @@ _JOINING_LOCATION_RE = re.compile('\\[Behaviour\\] Joining (wrld_[a-f0-9-]+:[^\\
 _SWITCH_RE = re.compile('\\[Behaviour\\] Switching (.+?) to avatar (.+?)\\s*$', re.IGNORECASE)
 _LOAD_AVATAR_RE = re.compile('Loading Avatar Data:(avtr_[a-f0-9-]+)', re.IGNORECASE)
 _AVTR_MENTION_RE = re.compile('(?:Avatar|avatar) [\'\\"]?(avtr_[a-f0-9-]+)[\'\\"]?', re.IGNORECASE)
+_API_AVTR_RE = re.compile('avatars/(avtr_[a-f0-9-]+)', re.IGNORECASE)
 _UNPACK_RE = re.compile('\\[AssetBundleDownloadManager\\].*Unpacking Avatar \\((.+?) by (.+?)\\)', re.IGNORECASE)
 _FOLLOW_WINDOW = 200
-_AVTR_WINDOW = 120
+_AVTR_WINDOW = 250
+_TAIL_READ_BYTES = 512 * 1024
 _log_lines_cache: tuple[str, float, list[str]] | None = None
 
 @dataclass(frozen=True)
@@ -51,6 +53,20 @@ def invalidate_log_cache() -> None:
     global _log_lines_cache
     _log_lines_cache = None
 
+def _read_log_text(path: Path, *, tail_only: bool=False) -> str | None:
+    try:
+        if not tail_only:
+            return path.read_text(encoding='utf-8', errors='replace')
+        with path.open('rb') as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - _TAIL_READ_BYTES))
+            data = handle.read()
+        return data.decode('utf-8', errors='replace')
+    except OSError:
+        logger.debug('Could not read VRChat log at %s', path, exc_info=True)
+        return None
+
 def _read_log_lines_cached(log_path: Path | None=None) -> list[str] | None:
     global _log_lines_cache
     path = log_path or find_vrchat_log_file()
@@ -61,14 +77,16 @@ def _read_log_lines_cached(log_path: Path | None=None) -> list[str] | None:
     except OSError:
         return None
     cache_key = str(path.resolve())
-    if _log_lines_cache is not None and _log_lines_cache[0] == cache_key and (_log_lines_cache[1] == mtime):
+    tail_only = log_path is None
+    cache_suffix = ':tail' if tail_only else ''
+    full_cache_key = f'{cache_key}{cache_suffix}'
+    if _log_lines_cache is not None and _log_lines_cache[0] == full_cache_key and (_log_lines_cache[1] == mtime):
         return _log_lines_cache[2]
-    try:
-        lines = path.read_text(encoding='utf-8', errors='replace').splitlines()
-    except OSError:
-        logger.debug('Could not read VRChat log at %s', path, exc_info=True)
+    text = _read_log_text(path, tail_only=tail_only)
+    if text is None:
         return None
-    _log_lines_cache = (cache_key, mtime, lines)
+    lines = text.splitlines()
+    _log_lines_cache = (full_cache_key, mtime, lines)
     return lines
 
 def _last_room_start_index(lines: list[str]) -> int:
@@ -107,6 +125,18 @@ def parse_players_from_log(log_path: Path | None=None) -> tuple[list[LogPlayer],
 def log_players_for_current_room() -> tuple[list[LogPlayer], str | None]:
     return parse_players_from_log()
 
+def _avatar_id_from_line(line: str) -> str:
+    load_match = _LOAD_AVATAR_RE.search(line)
+    if load_match:
+        return load_match.group(1)
+    mention_match = _AVTR_MENTION_RE.search(line)
+    if mention_match:
+        return mention_match.group(1)
+    api_match = _API_AVTR_RE.search(line)
+    if api_match:
+        return api_match.group(1)
+    return ''
+
 def _avatar_id_after_line(lines: list[str], start_index: int, *, window: int=_AVTR_WINDOW) -> str:
     end = min(len(lines), start_index + window)
     for follow_index in range(start_index, end):
@@ -114,13 +144,33 @@ def _avatar_id_after_line(lines: list[str], start_index: int, *, window: int=_AV
         if follow_index > start_index:
             if _JOIN_RE.search(follow) or _SWITCH_RE.search(follow) or _LEAVE_RE.search(follow):
                 break
-        load_match = _LOAD_AVATAR_RE.search(follow)
-        if load_match:
-            return load_match.group(1)
-        mention_match = _AVTR_MENTION_RE.search(follow)
-        if mention_match:
-            return mention_match.group(1)
+        avatar_id = _avatar_id_from_line(follow)
+        if avatar_id:
+            return avatar_id
     return ''
+
+def _avatar_id_near_index(lines: list[str], start_index: int, *, window: int=_AVTR_WINDOW, stop_at_switch: bool=True) -> str:
+    end = min(len(lines), start_index + window)
+    for follow_index in range(start_index, end):
+        follow = lines[follow_index]
+        if follow_index > start_index and stop_at_switch:
+            if _SWITCH_RE.search(follow) or _LEAVE_RE.search(follow):
+                break
+        avatar_id = _avatar_id_from_line(follow)
+        if avatar_id:
+            return avatar_id
+    return ''
+
+def _switch_index_before(lines: list[str], before_index: int, display_name: str, *, lookback: int=800) -> int | None:
+    target = display_name.strip()
+    if not target:
+        return None
+    start = max(0, before_index - lookback)
+    for index in range(before_index - 1, start - 1, -1):
+        switch_match = _SWITCH_RE.search(lines[index])
+        if switch_match and switch_match.group(1).strip() == target:
+            return index
+    return None
 
 def _author_for_avatar_name(lines: list[str], avatar_name: str, start_index: int) -> str:
     target = avatar_name.strip().casefold()
@@ -142,30 +192,37 @@ def _switch_avatar_names(room_lines: list[str]) -> dict[str, str]:
             mapping[switch_match.group(1).strip()] = switch_match.group(2).strip()
     return mapping
 
+def _avatar_id_for_join(lines: list[str], join_index: int, display_name: str) -> str:
+    avatar_id = _avatar_id_after_line(lines, join_index + 1)
+    if avatar_id:
+        return avatar_id
+    switch_idx = _switch_index_before(lines, join_index, display_name)
+    if switch_idx is None:
+        return ''
+    return _avatar_id_near_index(lines, switch_idx + 1, stop_at_switch=False)
+
 def _build_user_avatar_map_from_lines(lines: list[str]) -> dict[str, str]:
     name_to_user: dict[str, str] = {}
     user_to_avatar: dict[str, str] = {}
-    name_to_avatar: dict[str, str] = {}
     for index, line in enumerate(lines):
         join_match = _JOIN_RE.search(line)
         if join_match:
             display_name = join_match.group(1).strip()
             user_id = join_match.group(2)
             name_to_user[display_name] = user_id
-            avatar_id = _avatar_id_after_line(lines, index + 1)
+            avatar_id = _avatar_id_for_join(lines, index, display_name)
             if avatar_id:
                 user_to_avatar[user_id] = avatar_id
             continue
         switch_match = _SWITCH_RE.search(line)
         if switch_match:
             display_name = switch_match.group(1).strip()
-            name_to_avatar[display_name] = ''
             user_id = name_to_user.get(display_name)
             if user_id:
                 user_to_avatar.pop(user_id, None)
-            avatar_id = _avatar_id_after_line(lines, index + 1)
-            if avatar_id and user_id:
-                user_to_avatar[user_id] = avatar_id
+                avatar_id = _avatar_id_near_index(lines, index + 1, stop_at_switch=False)
+                if avatar_id:
+                    user_to_avatar[user_id] = avatar_id
             continue
         leave_match = _LEAVE_RE.search(line)
         if leave_match:
@@ -174,19 +231,27 @@ def _build_user_avatar_map_from_lines(lines: list[str]) -> dict[str, str]:
             for display_name, mapped_user_id in list(name_to_user.items()):
                 if mapped_user_id == user_id:
                     name_to_user.pop(display_name, None)
-                    name_to_avatar.pop(display_name, None)
-    for display_name, avatar_id in name_to_avatar.items():
-        user_id = name_to_user.get(display_name)
-        if user_id and avatar_id:
+    for display_name, user_id in name_to_user.items():
+        if user_id in user_to_avatar:
+            continue
+        switch_idx = _switch_index_before(lines, len(lines), display_name)
+        if switch_idx is None:
+            continue
+        avatar_id = _avatar_id_near_index(lines, switch_idx + 1, stop_at_switch=False)
+        if avatar_id:
             user_to_avatar[user_id] = avatar_id
     return user_to_avatar
 
 def parse_avatar_ids_from_log(log_path: Path | None=None) -> dict[str, str]:
-    lines = _read_log_lines_cached(log_path)
-    if not lines:
+    try:
+        lines = _read_log_lines_cached(log_path)
+        if not lines:
+            return {}
+        start_idx = _last_room_start_index(lines)
+        return _build_user_avatar_map_from_lines(lines[start_idx:])
+    except Exception as e:
+        logger.warning('Failed to parse avatar IDs from log: %s', e, exc_info=True)
         return {}
-    start_idx = _last_room_start_index(lines)
-    return _build_user_avatar_map_from_lines(lines[start_idx:])
 
 def _read_log_lines(*, current_room_only: bool) -> list[str] | None:
     lines = _read_log_lines_cached()
@@ -264,10 +329,14 @@ def build_user_avatar_map_from_logs() -> dict[str, str]:
     return merged
 
 def lookup_player_avatar_info(user_id: str, display_name: str | None=None) -> PlayerAvatarInfo:
-    room_lines = _read_room_log_lines()
-    if not room_lines:
+    try:
+        room_lines = _read_room_log_lines()
+        if not room_lines:
+            return PlayerAvatarInfo()
+        return _build_player_avatar_info(room_lines, user_id, display_name=display_name)
+    except Exception as e:
+        logger.warning('Failed to lookup player avatar info for %s: %s', display_name or user_id, e, exc_info=True)
         return PlayerAvatarInfo()
-    return _build_player_avatar_info(room_lines, user_id, display_name=display_name)
 
 def lookup_player_avatar_info_historical(user_id: str, display_name: str | None=None) -> PlayerAvatarInfo:
     for path in find_vrchat_log_files():
@@ -292,7 +361,7 @@ def player_avatar_info(user_id: str, display_name: str | None=None) -> PlayerAva
         return PlayerAvatarInfo()
     return _build_player_avatar_info(room_lines, user_id, display_name=display_name)
 
-def resolve_player_avatar_id(user_id: str, display_name: str | None=None) -> str | None:
+def _avatar_id_from_log(user_id: str, display_name: str | None=None) -> str | None:
     info = player_avatar_info(user_id, display_name=display_name)
     return info.avatar_id
 

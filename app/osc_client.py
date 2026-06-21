@@ -124,8 +124,15 @@ class OscChatClient:
         if not self._rate_limiter.check():
             return
         formatted = self._base_formatter.format(text)
-        self._transport.send_chatbox(formatted, immediate=immediate, notify=notify)
-        self._rate_limiter.record()
+        try:
+            self._transport.send_chatbox(formatted, immediate=immediate, notify=notify)
+            self._rate_limiter.record()
+            from .osc_connection import OscConnectionTracker
+            OscConnectionTracker.instance().record_success()
+        except Exception as exc:
+            from .osc_connection import OscConnectionTracker
+            OscConnectionTracker.instance().record_failure(str(exc))
+            raise
 
     def format_with_mode(self, text: str, egg_mode: bool, extreme_height: bool, wall_of_china: bool=False) -> str:
         formatted = self._base_formatter.format(text)
@@ -141,11 +148,21 @@ class OscChatClient:
         formatted = self.format_with_mode(text, egg_mode=egg_mode, extreme_height=extreme_height, wall_of_china=wall_of_china)
         if not self._rate_limiter.check():
             return
-        self._transport.send_chatbox(formatted, immediate=immediate, notify=notify)
-        self._rate_limiter.record()
+        try:
+            self._transport.send_chatbox(formatted, immediate=immediate, notify=notify)
+            self._rate_limiter.record()
+            from .osc_connection import OscConnectionTracker
+            OscConnectionTracker.instance().record_success()
+        except Exception as exc:
+            from .osc_connection import OscConnectionTracker
+            OscConnectionTracker.instance().record_failure(str(exc))
+            raise
 
     def send_typing(self, typing: bool) -> None:
         try:
             self._transport.send_typing(typing)
-        except Exception:
-            pass
+            from .osc_connection import OscConnectionTracker
+            OscConnectionTracker.instance().record_success()
+        except Exception as exc:
+            from .osc_connection import OscConnectionTracker
+            OscConnectionTracker.instance().record_failure(str(exc))

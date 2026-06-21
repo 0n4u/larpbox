@@ -7,4 +7,5 @@ from .main_window import PresetConfigUI
 from .preset_storage import load_presets, save_presets
 from .settings_dialog import SettingsWindow
 from .login_window import LoginWindow
-__all__ = ['ChatboxPreview', 'TitleBar', 'OSCHandler', 'PresetAnimations', 'PresetConfigUI', 'PresetManagerWindow', 'SettingsWindow', 'LoginWindow', 'load_config', 'load_presets', 'save_config', 'save_presets']
+from .version import __version__
+__all__ = ['ChatboxPreview', 'TitleBar', 'OSCHandler', 'PresetAnimations', 'PresetConfigUI', 'PresetManagerWindow', 'SettingsWindow', 'LoginWindow', 'load_config', 'load_presets', 'save_config', 'save_presets', '__version__']

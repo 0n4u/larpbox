@@ -1,5 +1,5 @@
 from pathlib import Path
-from PyQt6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QFileDialog, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSizePolicy, QTextEdit, QVBoxLayout, QWidget
 from .chatbox_preview import ChatboxPreview
 from .config import get_bool, load_config, save_config
@@ -9,7 +9,7 @@ from .media_monitor import MediaIntegration
 from .chatbox_controller import OSCHandler, PresetAnimations
 from .preset_editor import PresetManagerWindow
 from .preset_storage import delete_preset, load_presets, resolve_preset_name, save_presets
-from .avatar_search_panel import AvatarSearchPanel
+from .avatar_tools_panel import AvatarToolsPanel
 from .account_info_panel import AccountInfoPanel
 from .friends_list_panel import FriendsListPanel
 from .player_list_bar import PlayerListBar
@@ -19,12 +19,17 @@ from .status_text import format_status_label
 from .theme import dark_theme, TOOLBAR_BUTTON, themed_menu
 from .frameless_chrome import apply_frameless_chrome
 from .image_loader import RemoteImageLabel
-from .ui_animations import pop_in_widget
+from .ui_animations import flash_widget, pop_in_widget, pulse_widget, window_fade_in
 from .services.errors import ErrorBus
+from .services.rich_presence import RichPresenceManager
 from .services.session_manager import SessionManager
 from .services.preset_preferences import get_favorites, get_recents, is_favorite, record_recent, toggle_favorite
 from .widgets.account_settings_dialog import AccountSettingsWindow
 from .widgets.instance_info_bar import InstanceInfoBar
+from .widgets.system_tray import AppSystemTray
+from .version import __version__
+from .hotkey_manager import HotkeyManager
+from .osc_connection import OscConnectionTracker
 from .vrchat_auth import VRChatSession
 logger = get_logger('ui')
 
@@ -48,6 +53,7 @@ class PresetConfigUI(QWidget):
         self.account_settings_window = None
         self.preset_manager_window = None
         self.send_blank_enabled = True
+        self._system_tray: AppSystemTray | None = None
         self.chatbox_preview: ChatboxPreview | None = None
         self.media = MediaIntegration()
         self.media_enabled = False
@@ -60,6 +66,7 @@ class PresetConfigUI(QWidget):
         self._apply_media_setting_from_config()
         self._apply_exclusive_ui_state()
         self._apply_panel_visibility()
+        HotkeyManager.instance().reload_bindings()
         ErrorBus.instance().message_posted.connect(self._on_error_bus_message)
         if self.session is not None:
             RemoteImageLabel.set_session(self.session)
@@ -68,7 +75,7 @@ class PresetConfigUI(QWidget):
             self.media.set_enabled(False)
 
     def _window_title(self) -> str:
-        return 'larpbox'
+        return f'larpbox v{__version__}'
 
     def _apply_media_setting_from_config(self) -> None:
         config = load_config()
@@ -94,7 +101,7 @@ class PresetConfigUI(QWidget):
         left_layout.setSpacing(6)
         self.friends_list = FriendsListPanel(session=self.session, parent=self)
         left_layout.addWidget(self.friends_list, 0)
-        self.avatar_search = AvatarSearchPanel(session=self.session, parent=self)
+        self.avatar_search = AvatarToolsPanel(session=self.session, parent=self)
         left_layout.addWidget(self.avatar_search, 1)
         outer_layout.addWidget(left_column)
         center_column = QWidget()
@@ -109,6 +116,7 @@ class PresetConfigUI(QWidget):
         preset_stack_layout.addWidget(self.instance_info)
         self.player_list = PlayerListBar(session=self.session, parent=self)
         self.player_list.instance_updated.connect(self.instance_info.apply)
+        self.player_list.instance_updated.connect(RichPresenceManager.instance().update_instance)
         preset_stack_layout.addWidget(self.player_list)
         self.container = QWidget()
         self.container.setObjectName('roundContainer')
@@ -191,6 +199,12 @@ class PresetConfigUI(QWidget):
         self.load_presets()
         self.preset_list.itemDoubleClicked.connect(self.play_preset)
         status_bar = QHBoxLayout()
+        self.osc_status_dot = QLabel('●')
+        self.osc_status_dot.setFixedWidth(14)
+        self.osc_status_dot.setToolTip('OSC connection status')
+        self._apply_osc_status_dot()
+        OscConnectionTracker.instance().status_changed.connect(self._on_osc_status_changed)
+        status_bar.addWidget(self.osc_status_dot)
         self.status_label = QLabel('Status: Idle')
         status_bar.addWidget(self.status_label)
         status_bar.addStretch()
@@ -281,17 +295,19 @@ class PresetConfigUI(QWidget):
             QTimer.singleShot(0, self.chatbox_preview.refresh_geometry)
         if not getattr(self, '_fade_in_started', False):
             self._fade_in_started = True
-            animation = QPropertyAnimation(self, b'windowOpacity')
-            animation.setDuration(320)
-            animation.setStartValue(0.0)
-            animation.setEndValue(1.0)
-            animation.setEasingCurve(QEasingCurve.Type.OutQuart)
-            animation.start()
-            self._fade_animation = animation
-            panel_base_delay_ms = 320
-            panel_stagger = ((self.avatar_search.container, 40), (self.friends_list.frame, 70), (self.player_list.frame, 90), (self.account_info.frame, 110), (self.container, 130), (self.preview_container, 160))
+            window_fade_in(self, duration=360)
+            panel_base_delay_ms = 280
+            panel_stagger = (
+                (self.avatar_search.container, 30),
+                (self.friends_list.frame, 55),
+                (self.instance_info.frame, 75),
+                (self.player_list.frame, 95),
+                (self.account_info.frame, 115),
+                (self.container, 135),
+                (self.preview_container, 165),
+            )
             for widget, delay_ms in panel_stagger:
-                pop_in_widget(widget, duration=300, delay_ms=panel_base_delay_ms + delay_ms)
+                pop_in_widget(widget, duration=320, delay_ms=panel_base_delay_ms + delay_ms)
 
     def start_timers(self):
         self.placeholder_timer = QTimer()
@@ -332,12 +348,38 @@ class PresetConfigUI(QWidget):
                 return
         self.osc_handler.send_blank_message_async()
 
+    def _set_status_text(self, text: str) -> None:
+        self.status_label.setText(text)
+        flash_widget(self.status_label, duration=220, dip=0.55)
+
     def _refresh_status_label(self, *, playing_preset: str | None=None) -> None:
         preset = playing_preset if playing_preset is not None else self.current_playing_preset
-        self.status_label.setText(format_status_label(playing_preset=preset, wall_of_china=self.osc_handler.wall_of_china, insane_egg_mode=self.osc_handler.insane_egg_mode, exclusive_mode=self.osc_handler.is_exclusive_mode_active(), media_enabled=self.osc_handler.media_enabled, media_text=self.osc_handler.media_text))
+        self._set_status_text(format_status_label(playing_preset=preset, wall_of_china=self.osc_handler.wall_of_china, insane_egg_mode=self.osc_handler.insane_egg_mode, exclusive_mode=self.osc_handler.is_exclusive_mode_active(), media_enabled=self.osc_handler.media_enabled, media_text=self.osc_handler.media_text))
 
-    def _set_idle_status_label(self) -> None:
-        self._refresh_status_label(playing_preset=None)
+    def set_system_tray(self, tray: AppSystemTray | None) -> None:
+        self._system_tray = tray
+
+    def _apply_osc_status_dot(self) -> None:
+        healthy = OscConnectionTracker.instance().is_healthy()
+        color = '#7db87d' if healthy else '#e07070'
+        self.osc_status_dot.setStyleSheet(f'color: {color}; font-size: 10pt;')
+        self.osc_status_dot.setToolTip(OscConnectionTracker.instance().tooltip())
+
+    def _on_osc_status_changed(self, _healthy: bool, _message: str) -> None:
+        self._apply_osc_status_dot()
+
+    def play_hotkey_preset(self, slot: int) -> None:
+        preset_name = HotkeyManager.instance().preset_for_slot(slot)
+        if not preset_name:
+            return
+        for index in range(self.preset_list.count()):
+            item = self.preset_list.item(index)
+            if item is not None and self._preset_display_name(item) == preset_name:
+                self.play_preset(item)
+                if not self.isVisible():
+                    self.showNormal()
+                return
+        logger.info('Hotkey preset not found in list: %s', preset_name)
 
     def send_blank_if_idle(self):
         if self.osc_handler.is_exclusive_mode_active():
@@ -348,11 +390,11 @@ class PresetConfigUI(QWidget):
 
     def play_preset(self, item):
         if self.osc_handler.is_exclusive_mode_active():
-            self.status_label.setText('Status: Presets disabled in Exclusive Mode')
+            self._set_status_text('Status: Presets disabled in Exclusive Mode')
             return
         preset_name = self._preset_display_name(item)
         if self.current_playing_preset:
-            self.status_label.setText(f'Status: Stopping {self.current_playing_preset}...')
+            self._set_status_text(f'Status: Stopping {self.current_playing_preset}...')
             self.stop_preset()
         animation_name = resolve_preset_name(preset_name)
         frames = self.preset_animations.get_animation_frames(animation_name)
@@ -362,10 +404,10 @@ class PresetConfigUI(QWidget):
             logger.info('Playing preset=%s (%d frames)', preset_name, len(frames))
             self.current_playing_preset = preset_name
             record_recent(preset_name)
-            self.status_label.setText(f'Status: Playing {preset_name}')
+            self._set_status_text(f'Status: Playing {preset_name}')
         else:
             self.current_playing_preset = None
-            self.status_label.setText('Status: Failed to start preset')
+            self._set_status_text('Status: Failed to start preset')
             self._configure_and_start_placeholder_timer()
 
     def on_chatbox_sent(self, formatted_payload: str, label: str) -> None:
@@ -380,6 +422,8 @@ class PresetConfigUI(QWidget):
 
     def apply_session(self, session: VRChatSession | None) -> None:
         self.session = session
+        if session is None:
+            RichPresenceManager.instance().clear()
         RemoteImageLabel.set_session(session)
         if hasattr(self, 'friends_list'):
             self.friends_list.set_session(session)
@@ -450,14 +494,14 @@ class PresetConfigUI(QWidget):
 
     def quick_add_preset(self):
         if self.osc_handler.is_exclusive_mode_active():
-            self.status_label.setText('Status: Presets disabled in Exclusive Mode')
+            self._set_status_text('Status: Presets disabled in Exclusive Mode')
             return
         self.open_preset_manager()
         self.preset_manager_window.create_preset()
 
     def delete_selected_preset(self):
         if self.osc_handler.is_exclusive_mode_active():
-            self.status_label.setText('Status: Presets disabled in Exclusive Mode')
+            self._set_status_text('Status: Presets disabled in Exclusive Mode')
             return
         items = self.preset_list.selectedItems()
         if not items:
@@ -473,7 +517,7 @@ class PresetConfigUI(QWidget):
         if self.current_playing_preset == name:
             self.stop_preset()
         self.on_presets_changed_from_manager()
-        self.status_label.setText(f'Status: Deleted {name}')
+        self._set_status_text(f'Status: Deleted {name}')
 
     def on_presets_changed_from_manager(self):
         self.preset_animations.load_animations()
@@ -510,6 +554,7 @@ class PresetConfigUI(QWidget):
             if name in recents[:5]:
                 label = f'↺ {label}' if not label.startswith('★') else f'↺ {label}'
             self.preset_list.addItem(label)
+        flash_widget(self.preset_list, duration=200, dip=0.7)
 
     def _toggle_favorites_filter(self, enabled: bool) -> None:
         self._show_favorites_only = enabled
@@ -543,7 +588,7 @@ class PresetConfigUI(QWidget):
             current.update(imported)
             save_presets(current)
             self.on_presets_changed_from_manager()
-            self.status_label.setText(f'Status: Imported {len(imported)} preset(s)')
+            self._set_status_text(f'Status: Imported {len(imported)} preset(s)')
         except Exception as exc:
             QMessageBox.warning(self, 'Import Failed', str(exc))
 
@@ -553,7 +598,7 @@ class PresetConfigUI(QWidget):
             return
         try:
             save_presets(load_presets(), Path(path))
-            self.status_label.setText('Status: Presets exported')
+            self._set_status_text('Status: Presets exported')
         except Exception as exc:
             QMessageBox.warning(self, 'Export Failed', str(exc))
 
@@ -573,7 +618,7 @@ class PresetConfigUI(QWidget):
 
     def _on_error_bus_message(self, text: str, level: str) -> None:
         prefix = {'info': '', 'warning': 'Warning: ', 'error': 'Error: '}.get(level, '')
-        self.status_label.setText(f'Status: {prefix}{text[:120]}')
+        self._set_status_text(f'Status: {prefix}{text[:120]}')
 
     def load_presets(self):
         self._refresh_preset_list()
@@ -600,9 +645,9 @@ class PresetConfigUI(QWidget):
             return
         if self.current_playing_preset:
             if changed:
-                self.status_label.setText('Status: Playing (Media + Preset)')
+                self._set_status_text('Status: Playing (Media + Preset)')
             return
-        self.status_label.setText('Status: Playing (Media)')
+        self._set_status_text('Status: Playing (Media)')
         if changed:
             self.osc_handler.push_media_to_chatbox(force=True)
 
@@ -612,7 +657,17 @@ class PresetConfigUI(QWidget):
             if w is not None:
                 w.setEnabled(not active)
 
+    def _set_idle_status_label(self) -> None:
+        self._refresh_status_label(playing_preset=None)
+
     def closeEvent(self, event):
+        config = load_config()
+        tray = self._system_tray
+        if get_bool(config.get('close_to_tray', True)) and tray is not None and tray.is_active():
+            event.ignore()
+            self.hide()
+            tray.show_minimized_hint()
+            return
         event.accept()
         app = QApplication.instance()
         if app is not None:
@@ -631,6 +686,7 @@ class PresetConfigUI(QWidget):
             self.friends_list.cleanup()
         if hasattr(self, 'player_list'):
             self.player_list.cleanup()
+        RichPresenceManager.instance().cleanup()
         if hasattr(self, 'account_info'):
             self.account_info.cleanup()
         if hasattr(self, 'media'):

@@ -1,11 +1,11 @@
 from __future__ import annotations
-from PyQt6.QtCore import QEasingCurve, Qt, QPropertyAnimation, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import QCheckBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 from .config import get_bool, load_config
 from .frameless_chrome import apply_frameless_chrome
 from .theme import dark_theme
 from .title_bar import TitleBar
-from .ui_animations import pop_in_widget, stagger_pop_in
+from .ui_animations import pop_in_widget, stagger_pop_in, window_fade_in
 from .vrchat_auth import LoginFailed, TwoFactorRequired, VRChatSession, login, persist_session
 _INPUT_HEIGHT = 30
 _BASE_HEIGHT = 292
@@ -249,15 +249,9 @@ class LoginWindow(QWidget):
         apply_frameless_chrome(self)
         if not self._intro_animated:
             self._intro_animated = True
-            window_fade = QPropertyAnimation(self, b'windowOpacity')
-            window_fade.setDuration(300)
-            window_fade.setStartValue(0.0)
-            window_fade.setEndValue(1.0)
-            window_fade.setEasingCurve(QEasingCurve.Type.OutQuart)
-            window_fade.start()
-            self._window_fade = window_fade
-            pop_in_widget(self.container, duration=280)
-            stagger_pop_in(self._intro_targets, duration=260, step_ms=50)
+            window_fade_in(self, duration=340)
+            pop_in_widget(self.container, duration=300)
+            stagger_pop_in(self._intro_targets, duration=260, step_ms=45)
         self.username_input.setFocus()
 
     def closeEvent(self, event) -> None:

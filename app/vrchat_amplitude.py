@@ -23,29 +23,34 @@ def _amplitude_paths() -> list[Path]:
     return paths
 
 def build_user_avatar_map_from_amplitude() -> dict[str, str]:
-    mapping: dict[str, str] = {}
-    for path in _amplitude_paths():
-        try:
-            text = path.read_text(encoding='utf-8', errors='replace')
-        except OSError:
-            continue
-        if not text.strip():
-            continue
-        for user_id, avatar_id in _PAIR_RE.findall(text):
-            mapping[user_id] = avatar_id
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError:
-            payload = None
-        if isinstance(payload, list):
-            for item in payload:
-                if not isinstance(item, dict):
-                    continue
-                user_id = str(item.get('userId') or item.get('user_id') or '')
-                avatar_id = str(item.get('avatarId') or item.get('avatar_id') or '')
-                if user_id.startswith('usr_') and avatar_id.startswith('avtr_'):
-                    mapping[user_id] = avatar_id
-        elif isinstance(payload, dict):
-            for user_id, avatar_id in _PAIR_RE.findall(json.dumps(payload)):
+    try:
+        mapping: dict[str, str] = {}
+        for path in _amplitude_paths():
+            try:
+                text = path.read_text(encoding='utf-8', errors='replace')
+            except OSError:
+                continue
+            if not text.strip():
+                continue
+            for user_id, avatar_id in _PAIR_RE.findall(text):
                 mapping[user_id] = avatar_id
-    return mapping
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                payload = None
+            if isinstance(payload, list):
+                for item in payload:
+                    if not isinstance(item, dict):
+                        continue
+                    user_id = str(item.get('userId') or item.get('user_id') or '')
+                    avatar_id = str(item.get('avatarId') or item.get('avatar_id') or '')
+                    if user_id.startswith('usr_') and avatar_id.startswith('avtr_'):
+                        mapping[user_id] = avatar_id
+            elif isinstance(payload, dict):
+                for user_id, avatar_id in _PAIR_RE.findall(json.dumps(payload)):
+                    mapping[user_id] = avatar_id
+        return mapping
+    except Exception as e:
+        logger = get_logger('amplitude')
+        logger.warning('Failed to build user avatar map from amplitude: %s', e, exc_info=True)
+        return {}

@@ -3,7 +3,9 @@ import ctypes
 import io
 import logging
 import sys
+import traceback
 from pathlib import Path
+from typing import Any
 _DEBUG_MODE = False
 _LOG_FILE: Path | None = None
 
@@ -27,6 +29,27 @@ def truncate_for_log(text: str | None, max_len: int=96) -> str:
     if len(s) <= max_len:
         return s
     return f'{s[:max_len - 1]}…'
+
+def log_exception(log: logging.Logger, context: str, exc: BaseException, *, exc_info: tuple[type[BaseException], BaseException, object] | bool | None=None) -> None:
+    if exc_info is None:
+        exc_info = exc
+    log.error('[%s] %s: %s', context, type(exc).__name__, exc, exc_info=exc_info)
+    if _DEBUG_MODE:
+        log.debug('[%s] traceback:\n%s', context, ''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+
+def debug_event(log: logging.Logger, event: str, **fields: Any) -> None:
+    if not _DEBUG_MODE:
+        return
+    if not fields:
+        log.debug(event)
+        return
+    parts = []
+    for key, value in fields.items():
+        text = str(value).replace('\n', '\\n')
+        if len(text) > 120:
+            text = f'{text[:117]}…'
+        parts.append(f'{key}={text}')
+    log.debug('%s | %s', event, ' '.join(parts))
 
 def _enable_virtual_terminal() -> None:
     if sys.platform != 'win32':

@@ -31,12 +31,39 @@ def _save() -> None:
     _CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
     _CACHE_PATH.write_text(json.dumps(_CACHE, indent=2), encoding='utf-8')
 
-def get_cached_avatar_id(user_id: str) -> str | None:
+FORCE_CLONE_CACHE_MAX_AGE_SEC = 7 * 24 * 3600
+
+def get_cached_avatar_id(user_id: str, *, max_age_sec: float | None=None) -> str | None:
     entry = _load().get(user_id)
     if not isinstance(entry, dict):
         return None
     avatar_id = str(entry.get('avatar_id') or '').strip()
-    return avatar_id or None
+    if not avatar_id:
+        return None
+    if max_age_sec is not None:
+        updated_at = entry.get('updated_at')
+        if isinstance(updated_at, (int, float)):
+            if time.time() - float(updated_at) > max_age_sec:
+                return None
+    return avatar_id
+
+def get_recent_avatar_id_for_copy(user_id: str, *, in_room: bool) -> str | None:
+    entry = _load().get(user_id)
+    if not isinstance(entry, dict):
+        return None
+    avatar_id = str(entry.get('avatar_id') or '').strip()
+    if not avatar_id.startswith('avtr_'):
+        return None
+    source = str(entry.get('source') or '')
+    updated_at = entry.get('updated_at')
+    age_sec = time.time() - float(updated_at) if isinstance(updated_at, (int, float)) else float('inf')
+    if in_room:
+        if source in _LOG_SOURCES:
+            return avatar_id
+        if age_sec <= 3600:
+            return avatar_id
+        return None
+    return get_cached_avatar_id(user_id, max_age_sec=FORCE_CLONE_CACHE_MAX_AGE_SEC)
 
 def sync_live_log_avatars(mapping: dict[str, str]) -> int:
     if not mapping:

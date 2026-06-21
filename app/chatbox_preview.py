@@ -4,6 +4,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QFontMetricsF, QTextOption
 from PyQt6.QtWidgets import QLabel, QTextEdit
 from .chatbox_layout import MAX_PAYLOAD_CHARS, ChatboxLayout, VRCHAT_WRAP_WIDTH_PX, layout_chatbox_payload
+from .ui_animations import flash_widget
 _BASE_FONT_PT = 10.0
 _MIN_FONT_PT = 5.0
 
@@ -103,9 +104,11 @@ class ChatboxPreview:
             self.preview_text.setPlainText(rendered)
             self.preview_text.blockSignals(False)
             self._last_render_key = render_key
+            flash_widget(self.preview_text, duration=240, dip=0.82)
         if meta != self._last_meta:
             self.preview_meta.setText(meta)
             self._last_meta = meta
+            flash_widget(self.preview_meta, duration=200, dip=0.55)
 
     def refresh_geometry(self) -> None:
         if self._last_formatted:

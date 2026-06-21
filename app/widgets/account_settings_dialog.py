@@ -5,7 +5,7 @@ from ..config import clear_auth_session, get_bool, load_config, save_config
 from ..frameless_chrome import apply_frameless_chrome
 from ..theme import dark_theme
 from ..title_bar import TitleBar
-from ..ui_animations import pop_in_widget
+from ..ui_animations import pop_in_widget, window_fade_in
 from ..vrchat_auth import VRChatSession
 
 def _mask_identifier(value: str, *, visible: int=2) -> str:
@@ -37,6 +37,7 @@ class AccountSettingsWindow(QWidget):
         self.setWindowTitle('')
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setWindowOpacity(0.0)
         self.setFixedSize(360, 340)
         self.loading_settings = False
         self.init_ui()
@@ -180,7 +181,8 @@ class AccountSettingsWindow(QWidget):
         apply_frameless_chrome(self)
         if not getattr(self, '_intro_animated', False):
             self._intro_animated = True
-            pop_in_widget(self.container, duration=280)
+            window_fade_in(self, duration=340)
+            pop_in_widget(self.container, duration=300)
 
     def set_session(self, session: VRChatSession | None) -> None:
         self.session = session

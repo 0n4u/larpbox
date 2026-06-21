@@ -10,6 +10,8 @@ from .services.session_manager import SessionManager
 from .status_indicator import StatusIndicator
 from .ui_layout import PREVIEW_PANEL_HEIGHT, PREVIEW_PANEL_WIDTH
 from .theme import TOOLBAR_BUTTON, dark_theme, themed_menu
+from .ui_animations import flash_widget, pop_in_widget, pulse_widget
+from .api_startup import startup_delay_ms
 from .vrchat_api import CurrentUserProfile, get_current_user_profile, user_profile_url
 from .vrchat_auth import VRChatSession
 logger = get_logger('account_info')
@@ -56,7 +58,7 @@ class AccountInfoPanel(QWidget):
         if self.session is not None:
             RemoteImageLabel.set_session(self.session)
             self._poll_timer.start()
-            QTimer.singleShot(500, self.refresh)
+            QTimer.singleShot(startup_delay_ms('account'), self.refresh)
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -135,10 +137,19 @@ class AccountInfoPanel(QWidget):
     def _show_context_menu(self, pos) -> None:
         if self._profile is None:
             return
-        menu = themed_menu(self)
-        profile = menu.addAction('Open VRChat Profile')
-        profile.triggered.connect(lambda: webbrowser.open(user_profile_url(self._profile.user_id)))
-        menu.exec(self.frame.mapToGlobal(pos))
+        menu = None
+        try:
+            menu = themed_menu(self)
+            profile = menu.addAction('Open VRChat Profile')
+            profile.triggered.connect(lambda: webbrowser.open(user_profile_url(self._profile.user_id)))
+            menu.exec(self.frame.mapToGlobal(pos))
+        except Exception as e:
+            from .logging_setup import get_logger
+            logger = get_logger('account_info')
+            logger.error('Context menu failed for profile %s: %s', self._profile.display_name, e, exc_info=True)
+        finally:
+            if menu is not None:
+                menu.deleteLater()
 
     def _show_hint(self, text: str) -> None:
         self._profile = None
@@ -226,7 +237,7 @@ class AccountInfoPanel(QWidget):
         RemoteImageLabel.set_session(session)
         if not self._poll_timer.isActive():
             self._poll_timer.start()
-        QTimer.singleShot(500, self.refresh)
+        QTimer.singleShot(startup_delay_ms('account'), self.refresh)
 
     def refresh(self) -> None:
         if SessionManager.instance().is_relogin_active():
@@ -237,6 +248,7 @@ class AccountInfoPanel(QWidget):
         if self._worker and self._worker.isRunning():
             return
         self.instance_label.setText('Updating…')
+        pulse_widget(self.status_indicator.label, duration=900, min_opacity=0.5)
         self._worker = AccountProfileWorker(self.session)
         self._worker.finished_ok.connect(self._on_loaded)
         self._worker.finished_error.connect(self._on_error)
@@ -282,6 +294,8 @@ class AccountInfoPanel(QWidget):
         bio = _normalize_whitespace(profile.bio) if profile.bio else 'No description'
         self.bio_text.setPlainText(bio)
         self.bio_text.verticalScrollBar().setValue(0)
+        flash_widget(self.frame, duration=280, dip=0.75)
+        pop_in_widget(self.badges_host, duration=260, delay_ms=60)
 
     def cleanup(self) -> None:
         self._poll_timer.stop()

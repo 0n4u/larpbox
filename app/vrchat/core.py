@@ -6,21 +6,24 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass, field, replace
+from typing import Any, Literal
 import vrchatapi
-from vrchatapi.api import authentication_api, avatars_api, favorites_api, friends_api, instances_api, playermoderation_api, users_api, worlds_api
+from vrchatapi.api import authentication_api, avatars_api, favorites_api, friends_api, instances_api, invite_api, notifications_api, playermoderation_api, users_api, worlds_api
 from vrchatapi.exceptions import ApiException, UnauthorizedException
 from vrchatapi.models.add_favorite_request import AddFavoriteRequest
 from vrchatapi.models.favorite_type import FavoriteType
+from vrchatapi.models.invite_request import InviteRequest
 from vrchatapi.models.moderate_user_request import ModerateUserRequest
+from ..action_cancel import check_cancelled
 from ..api_rate_limit import rate_limited_external_call, rate_limited_vrchat_call
-from ..avatar_cache import get_cached_avatar_id, set_cached_avatar_id, sync_live_log_avatars
+from ..avatar_cache import FORCE_CLONE_CACHE_MAX_AGE_SEC, get_cached_avatar_id, get_recent_avatar_id_for_copy, set_cached_avatar_id, sync_live_log_avatars
 from ..logging_setup import get_logger
 from ..services.auth_errors import AuthSessionError, auth_session_error_from_api, api_error_text
 from ..user_status import UserStatusInfo, resolve_user_location, user_status_from_user
 from ..vrchat_auth import VRChatSession, _configure_api_client, USER_AGENT
-from ..vrchat_log_players import LogPlayer, log_players_for_current_room, lookup_player_avatar_info, lookup_player_avatar_info_historical, parse_avatar_ids_from_log, current_room_user_ids
+from ..vrchat_amplitude import build_user_avatar_map_from_amplitude
+from ..vrchat_log_players import LogPlayer, PlayerAvatarInfo, current_room_user_ids, invalidate_log_cache, log_players_for_current_room, lookup_player_avatar_info, lookup_player_avatar_info_historical, parse_avatar_ids_from_log
 from .models import AvatarResult, CurrentUserProfile, FriendEntry, InstanceInfo, InstancePlayer, TrustRank, UserBadge, trust_rank_from_tags
 VRCX_USER_AGENT = 'VRCX/2024.1.0'
 logger = get_logger('vrchat_api')
@@ -28,12 +31,27 @@ AVTRDB_SEARCH_URL = 'https://api.avtrdb.com/v3/avatar/search/vrcx'
 REQUI_SEARCH_BASE = 'https://requi.dev/vrcx_search.php'
 AVATAR_RECOVERY_SEARCH_BASE = 'https://api.avatarrecovery.com/Avatar/vrcx'
 _VRCX_AVATAR_PROVIDER_URLS = (AVTRDB_SEARCH_URL, AVATAR_RECOVERY_SEARCH_BASE, REQUI_SEARCH_BASE)
+_AUTHOR_LOOKUP_PROVIDER_URLS = (AVATAR_RECOVERY_SEARCH_BASE, REQUI_SEARCH_BASE, AVTRDB_SEARCH_URL)
 _ALT_HTTPS_PORTS = (2053, 8443)
 DEFAULT_AVATAR_FAVORITE_GROUP = 'avatars1'
 _INSTANCE_SUMMARY_CACHE: dict[str, tuple[float, str | None, int | None]] = {}
+_CURRENT_USER_CACHE: tuple[float, Any] | None = None
+_CURRENT_USER_CACHE_TTL_SEC = 12.0
+
+def _get_current_user(api_client: vrchatapi.ApiClient) -> Any:
+    global _CURRENT_USER_CACHE
+    now = time.monotonic()
+    if _CURRENT_USER_CACHE is not None and now - _CURRENT_USER_CACHE[0] < _CURRENT_USER_CACHE_TTL_SEC:
+        return _CURRENT_USER_CACHE[1]
+    auth = authentication_api.AuthenticationApi(api_client)
+    me = auth.get_current_user()
+    _CURRENT_USER_CACHE = (now, me)
+    return me
 _INSTANCE_SUMMARY_TTL_SEC = 120.0
 _USER_THUMB_CACHE: dict[str, str] = {}
 _USER_TRUST_CACHE: dict[str, TrustRank] = {}
+_USER_STATUS_CACHE: dict[str, UserStatusInfo] = {}
+_IN_INSTANCE_STATUS = UserStatusInfo(key='active', label='Online', color='#4cd964', in_world=True)
 _FILE_ID_RE = re.compile('(file_[a-f0-9-]+)', re.IGNORECASE)
 _THUMBNAIL_IMAGE_RE = re.compile('https://api\\.vrchat\\.cloud/api/1/image/(file_[a-f0-9-]+)/\\d+/(\\d+)', re.IGNORECASE)
 _FRIEND_INSTANCE_PLAYERS: dict[str, list[InstancePlayer]] = {}
@@ -42,6 +60,22 @@ _VRCHAT_HIDDEN_AVATAR_FILE_IDS = frozenset({'file_0e8c4e32-7444-44ea-ade4-313c01
 _GENERIC_AVATAR_NAMES = frozenset({'robot', 'default'})
 _AVATAR_RESOLVE_CACHE: dict[str, tuple[float, str | None]] = {}
 _AVATAR_RESOLVE_CACHE_TTL_SEC = 300.0
+_AUTHOR_DISPLAY_ID_CACHE: dict[str, str] = {}
+_AVATAR_PERF_CACHE: dict[str, str] = {}
+ForceCloneMode = Literal['in_room', 'remote']
+
+def clear_session_caches() -> None:
+    _USER_THUMB_CACHE.clear()
+    _USER_TRUST_CACHE.clear()
+    _USER_STATUS_CACHE.clear()
+    _AVATAR_RESOLVE_CACHE.clear()
+    _AUTHOR_DISPLAY_ID_CACHE.clear()
+    _INSTANCE_SUMMARY_CACHE.clear()
+    _AVATAR_PERF_CACHE.clear()
+    global _FRIEND_INSTANCE_PLAYERS, _CURRENT_USER_CACHE
+    _FRIEND_INSTANCE_PLAYERS = {}
+    _CURRENT_USER_CACHE = None
+
 from ..vrc_image_utils import normalize_vrc_image_url, VRCHAT_API
 
 def normalize_thumbnail_url(url: str) -> str:
@@ -90,7 +124,7 @@ def _rebuild_friend_instance_index(friends: list[FriendEntry]) -> None:
         key = _instance_location_key(location)
         if not key:
             continue
-        index.setdefault(key, []).append(InstancePlayer(user_id=friend.user_id, display_name=friend.display_name, thumbnail_url=normalize_thumbnail_url(friend.thumbnail_url), is_friend=True, trust=friend.trust))
+        index.setdefault(key, []).append(InstancePlayer(user_id=friend.user_id, display_name=friend.display_name, thumbnail_url=normalize_thumbnail_url(friend.thumbnail_url), is_friend=True, trust=friend.trust, status=friend.status))
     _FRIEND_INSTANCE_PLAYERS = index
 
 def avatar_profile_url(avatar_id: str) -> str:
@@ -132,10 +166,34 @@ def _avatar_from_api(avatar: Any) -> AvatarResult:
         performance = getattr(perf, 'performance_rating', None) or getattr(perf, 'pc_rating', None)
     return AvatarResult(id=str(getattr(avatar, 'id', '') or ''), name=str(getattr(avatar, 'name', '') or 'Unknown'), description=str(getattr(avatar, 'description', '') or '').strip(), author_name=str(getattr(avatar, 'author_name', '') or ''), image_url=str(getattr(avatar, 'thumbnail_image_url', '') or getattr(avatar, 'image_url', '') or ''), performance=str(performance) if performance else None)
 
+def _platforms_from_avtrdb(item: dict[str, Any]) -> tuple[str, ...]:
+    platforms: list[str] = []
+    perf = item.get('performance') or {}
+    if isinstance(perf, dict):
+        if perf.get('pc_rating'):
+            platforms.append('pc')
+        if perf.get('android_rating') or perf.get('quest_rating'):
+            platforms.append('android')
+        if perf.get('ios_rating'):
+            platforms.append('ios')
+    packages = item.get('platformPackages') or item.get('platform_packages') or []
+    if isinstance(packages, list):
+        for pkg in packages:
+            if not isinstance(pkg, dict):
+                continue
+            plat = str(pkg.get('platform') or '').casefold()
+            if 'android' in plat and 'android' not in platforms:
+                platforms.append('android')
+            elif 'ios' in plat and 'ios' not in platforms:
+                platforms.append('ios')
+            elif plat in ('standalonewindows', 'standalonemac', 'pc') and 'pc' not in platforms:
+                platforms.append('pc')
+    return tuple(platforms)
+
 def _avatar_from_avtrdb(item: dict[str, Any]) -> AvatarResult:
     perf = item.get('performance') or {}
     pc_rating = perf.get('pc_rating') if isinstance(perf, dict) else None
-    return AvatarResult(id=str(item.get('id') or ''), name=str(item.get('name') or 'Unknown'), description=str(item.get('description') or '').strip(), author_name=str(item.get('authorName') or ''), image_url=str(item.get('imageUrl') or item.get('thumbnailImageUrl') or ''), performance=str(pc_rating) if pc_rating else None, author_id=str(item.get('authorId') or ''))
+    return AvatarResult(id=str(item.get('id') or ''), name=str(item.get('name') or 'Unknown'), description=str(item.get('description') or '').strip(), author_name=str(item.get('authorName') or ''), image_url=str(item.get('imageUrl') or item.get('thumbnailImageUrl') or ''), performance=str(pc_rating) if pc_rating else None, author_id=str(item.get('authorId') or ''), platforms=_platforms_from_avtrdb(item))
 
 def _vrcx_headers() -> dict[str, str]:
     return {'User-Agent': VRCX_USER_AGENT, 'Referer': 'https://vrcx.app', 'Accept': 'application/json,*/*'}
@@ -216,6 +274,22 @@ def lookup_avatar_by_file_id(base_url: str, file_id: str) -> AvatarResult | None
             return result
     return None
 
+def lookup_avatar_by_id_external(avatar_id: str) -> AvatarResult | None:
+    avatar_id = (avatar_id or '').strip()
+    if not avatar_id.startswith('avtr_'):
+        return None
+    params = urllib.parse.urlencode({'search': avatar_id, 'n': '5'})
+    for base_url in _VRCX_AVATAR_PROVIDER_URLS:
+        for url in _vrcx_search_urls(base_url, params):
+            try:
+                items = _fetch_vrcx_json(url)
+            except Exception:
+                continue
+            for item in items:
+                if str(item.get('id') or '').casefold() == avatar_id.casefold():
+                    return _avatar_from_avtrdb(item)
+    return None
+
 def lookup_avatars_by_author(base_url: str, author_id: str) -> list[AvatarResult]:
     author_id = author_id.strip()
     if not author_id:
@@ -229,6 +303,16 @@ def lookup_avatars_by_author(base_url: str, author_id: str) -> list[AvatarResult
                 if url != _vrcx_search_urls(base_url, params)[0]:
                     logger.debug('Avatar author lookup succeeded via alternate URL: %s', url)
                 return results
+    return []
+
+def lookup_avatars_by_author_first_hit(author_id: str) -> list[AvatarResult]:
+    author_id = author_id.strip()
+    if not author_id:
+        return []
+    for base_url in _AUTHOR_LOOKUP_PROVIDER_URLS:
+        results = lookup_avatars_by_author(base_url, author_id)
+        if results:
+            return results
     return []
 
 def lookup_avatar_id_by_image_file_id(author_id: str, file_id: str) -> str | None:
@@ -386,12 +470,16 @@ def _instance_player_from_limited(user: Any, *, is_friend: bool=False, avatar_id
     tags = list(getattr(user, 'tags', None) or [])
     user_id = str(getattr(user, 'id', '') or '')
     trust = trust_rank_from_tags(tags)
+    status = user_status_from_user(user)
     if user_id:
         _USER_TRUST_CACHE[user_id] = trust
-    return InstancePlayer(user_id=user_id, display_name=str(getattr(user, 'display_name', '') or 'Unknown'), thumbnail_url=_profile_image_url(user), is_friend=is_friend or bool(getattr(user, 'is_friend', False)), trust=trust, avatar_id=avatar_id)
+        _USER_STATUS_CACHE[user_id] = status
+    perf = _avatar_performance_from_id(avatar_id)
+    return InstancePlayer(user_id=user_id, display_name=str(getattr(user, 'display_name', '') or 'Unknown'), thumbnail_url=_profile_image_url(user), is_friend=is_friend or bool(getattr(user, 'is_friend', False)), trust=trust, avatar_id=avatar_id, status=status, avatar_performance=perf)
 
 def _instance_player_from_log(log_player: LogPlayer, *, is_friend: bool=False, avatar_id: str | None=None) -> InstancePlayer:
-    return InstancePlayer(user_id=log_player.user_id, display_name=log_player.display_name, thumbnail_url='', is_friend=is_friend, trust=None, avatar_id=avatar_id)
+    cached_status = _USER_STATUS_CACHE.get(log_player.user_id)
+    return InstancePlayer(user_id=log_player.user_id, display_name=log_player.display_name, thumbnail_url='', is_friend=is_friend, trust=None, avatar_id=avatar_id, status=cached_status or _IN_INSTANCE_STATUS)
 
 def get_current_instance_log_only(session: VRChatSession | None=None, *, enrich: bool=True, max_enrich_requests: int=6) -> InstanceInfo | None:
     log_players, log_location = log_players_for_current_room()
@@ -402,7 +490,7 @@ def get_current_instance_log_only(session: VRChatSession | None=None, *, enrich:
     avatar_ids = parse_avatar_ids_from_log()
     sync_live_log_avatars(avatar_ids)
     players = [_instance_player_from_log(player, avatar_id=avatar_ids.get(player.user_id)) for player in log_players]
-    players = _apply_cached_thumbnails(players)
+    players = apply_cached_thumbnails(players)
     players = _apply_cached_trust(players)
     if session is not None and enrich:
         try:
@@ -411,7 +499,8 @@ def get_current_instance_log_only(session: VRChatSession | None=None, *, enrich:
         except Exception:
             logger.debug('Could not enrich log-only player list', exc_info=True)
     inst_type = instance_id.split('~', 1)[1].split('(', 1)[0] if '~' in instance_id else ''
-    return InstanceInfo(world_id=world_id, instance_id=instance_id, world_name='', player_count=max(len(players), 1), players=players, owner_id='', can_close_instance=False, region='', instance_type=inst_type)
+    players = _apply_avatar_perf(players)
+    return _build_instance_info(world_id, instance_id, player_count=max(len(players), 1), players=players, instance_type=inst_type)
 
 def _players_from_api_users(users: list[Any]) -> list[InstancePlayer]:
     return [_instance_player_from_limited(user, is_friend=bool(getattr(user, 'is_friend', False))) for user in users]
@@ -452,11 +541,11 @@ def _enrich_log_player(api_client: vrchatapi.ApiClient, log_player: LogPlayer, *
         user = users_api.UsersApi(api_client).get_user(log_player.user_id)
         player = _instance_player_from_limited(user, is_friend=log_player.user_id in friend_ids or bool(getattr(user, 'is_friend', False)))
         if player.display_name == 'Unknown' and log_player.display_name:
-            return InstancePlayer(user_id=player.user_id, display_name=log_player.display_name, thumbnail_url=player.thumbnail_url, is_friend=player.is_friend, trust=player.trust, avatar_id=resolve_player_avatar_id(player.user_id, log_player.display_name) or player.avatar_id)
+            return replace(player, display_name=log_player.display_name, avatar_id=resolve_player_avatar_id(player.user_id, log_player.display_name) or player.avatar_id)
         return player
     except Exception:
         logger.debug('Could not enrich log player %s', log_player.user_id, exc_info=True)
-        return InstancePlayer(user_id=log_player.user_id, display_name=log_player.display_name, thumbnail_url='', is_friend=log_player.user_id in friend_ids, trust=None, avatar_id=resolve_player_avatar_id(log_player.user_id, log_player.display_name))
+        return InstancePlayer(user_id=log_player.user_id, display_name=log_player.display_name, thumbnail_url='', is_friend=log_player.user_id in friend_ids, trust=None, avatar_id=resolve_player_avatar_id(log_player.user_id, log_player.display_name), status=_USER_STATUS_CACHE.get(log_player.user_id) or _IN_INSTANCE_STATUS)
 
 def _merge_players(*groups: list[InstancePlayer]) -> list[InstancePlayer]:
     merged: dict[str, InstancePlayer] = {}
@@ -468,7 +557,7 @@ def _merge_players(*groups: list[InstancePlayer]) -> list[InstancePlayer]:
             if existing is None:
                 merged[player.user_id] = player
                 continue
-            merged[player.user_id] = InstancePlayer(user_id=player.user_id, display_name=player.display_name or existing.display_name, thumbnail_url=player.thumbnail_url or existing.thumbnail_url, is_friend=existing.is_friend or player.is_friend, trust=player.trust or existing.trust, avatar_id=player.avatar_id or existing.avatar_id)
+            merged[player.user_id] = replace(existing, display_name=player.display_name or existing.display_name, thumbnail_url=player.thumbnail_url or existing.thumbnail_url, is_friend=existing.is_friend or player.is_friend, trust=player.trust or existing.trust, avatar_id=player.avatar_id or existing.avatar_id, status=player.status or existing.status, avatar_performance=player.avatar_performance or existing.avatar_performance)
     return sorted(merged.values(), key=lambda item: item.display_name.casefold())
 
 def _remember_player_thumbnails(players: list[InstancePlayer]) -> None:
@@ -483,6 +572,11 @@ def _remember_player_trust(players: list[InstancePlayer]) -> None:
         if player.user_id and player.trust is not None:
             _USER_TRUST_CACHE[player.user_id] = player.trust
 
+def _remember_player_status(players: list[InstancePlayer]) -> None:
+    for player in players:
+        if player.user_id and player.status is not None:
+            _USER_STATUS_CACHE[player.user_id] = player.status
+
 def _apply_cached_trust(players: list[InstancePlayer]) -> list[InstancePlayer]:
     updated: list[InstancePlayer] = []
     for player in players:
@@ -493,7 +587,20 @@ def _apply_cached_trust(players: list[InstancePlayer]) -> list[InstancePlayer]:
         if not cached:
             updated.append(player)
             continue
-        updated.append(InstancePlayer(user_id=player.user_id, display_name=player.display_name, thumbnail_url=player.thumbnail_url, is_friend=player.is_friend, trust=cached, avatar_id=player.avatar_id))
+        updated.append(replace(player, trust=cached))
+    return updated
+
+def _apply_cached_status(players: list[InstancePlayer]) -> list[InstancePlayer]:
+    updated: list[InstancePlayer] = []
+    for player in players:
+        if player.status is not None:
+            updated.append(player)
+            continue
+        cached = _USER_STATUS_CACHE.get(player.user_id)
+        if not cached:
+            updated.append(player)
+            continue
+        updated.append(replace(player, status=cached))
     return updated
 
 def _apply_cached_thumbnails(players: list[InstancePlayer]) -> list[InstancePlayer]:
@@ -503,11 +610,13 @@ def _apply_cached_thumbnails(players: list[InstancePlayer]) -> list[InstancePlay
         if player.thumbnail_url or not cached:
             updated.append(player)
             continue
-        updated.append(InstancePlayer(user_id=player.user_id, display_name=player.display_name, thumbnail_url=cached, is_friend=player.is_friend, trust=player.trust, avatar_id=player.avatar_id))
+        updated.append(replace(player, thumbnail_url=cached))
     return updated
 
 def apply_cached_thumbnails(players: list[InstancePlayer]) -> list[InstancePlayer]:
-    return _apply_cached_thumbnails(players)
+    players = _apply_cached_thumbnails(players)
+    players = _apply_cached_status(players)
+    return players
 
 def _enrich_players_from_api(api_client: vrchatapi.ApiClient, players: list[InstancePlayer], *, session: VRChatSession | None=None, max_requests: int=24, priority_user_ids: set[str] | None=None) -> list[InstancePlayer]:
     if max_requests <= 0:
@@ -523,7 +632,8 @@ def _enrich_players_from_api(api_client: vrchatapi.ApiClient, players: list[Inst
     for player in ordered:
         needs_thumb = not player.thumbnail_url
         needs_trust = player.trust is None
-        if not needs_thumb and (not needs_trust) or requests >= max_requests:
+        needs_status = player.status is None
+        if not needs_thumb and (not needs_trust) and (not needs_status) or requests >= max_requests:
             enriched.append(player)
             continue
         try:
@@ -540,14 +650,17 @@ def _enrich_players_from_api(api_client: vrchatapi.ApiClient, players: list[Inst
             thumb = normalize_thumbnail_url(thumb) or thumb
         tags = list(getattr(user, 'tags', None) or [])
         trust = player.trust or trust_rank_from_tags(tags)
+        status = user_status_from_user(user)
         if player.user_id:
             _USER_TRUST_CACHE[player.user_id] = trust
+            _USER_STATUS_CACHE[player.user_id] = status
         requests += 1
-        enriched.append(InstancePlayer(user_id=player.user_id, display_name=player.display_name, thumbnail_url=thumb or player.thumbnail_url, is_friend=player.is_friend or bool(getattr(user, 'is_friend', False)), trust=trust, avatar_id=player.avatar_id))
+        enriched.append(replace(player, thumbnail_url=thumb or player.thumbnail_url, is_friend=player.is_friend or bool(getattr(user, 'is_friend', False)), trust=trust, status=status))
     by_id = {player.user_id: player for player in enriched}
     result = [by_id.get(player.user_id, player) for player in players]
     _remember_player_thumbnails(result)
     _remember_player_trust(result)
+    _remember_player_status(result)
     return result
 
 def _enrich_missing_thumbnails(api_client: vrchatapi.ApiClient, players: list[InstancePlayer], *, max_requests: int=16) -> list[InstancePlayer]:
@@ -582,6 +695,44 @@ def _badges_from_user(user: Any) -> list[UserBadge]:
         badges.append(UserBadge(badge_id=str(getattr(badge, 'badge_id', '') or ''), name=str(getattr(badge, 'badge_name', '') or 'Badge'), image_url=str(getattr(badge, 'badge_image_url', '') or ''), showcased=bool(getattr(badge, 'showcased', False))))
     badges.sort(key=lambda item: (not item.showcased, item.name.casefold()))
     return badges
+
+def _build_instance_info(world_id: str, instance_id: str, *, world_name: str='', player_count: int=0, players: list[InstancePlayer] | None=None, owner_id: str='', can_close_instance: bool=False, region: str='', instance_type: str='', owner_display_name: str='', max_players: int | None=None) -> InstanceInfo:
+    location = f'{world_id}:{instance_id}' if world_id and instance_id else ''
+    return InstanceInfo(world_id=world_id, instance_id=instance_id, world_name=world_name, player_count=player_count, players=players or [], owner_id=owner_id, can_close_instance=can_close_instance, region=region, instance_type=instance_type, location=location, owner_display_name=owner_display_name, max_players=max_players)
+
+def _avatar_performance_from_id(avatar_id: str | None) -> str | None:
+    if not avatar_id:
+        return None
+    return _AVATAR_PERF_CACHE.get(avatar_id)
+
+def _player_with_avatar_perf(player: InstancePlayer) -> InstancePlayer:
+    if player.avatar_performance or not player.avatar_id:
+        return player
+    perf = _avatar_performance_from_id(player.avatar_id)
+    if not perf:
+        return player
+    return replace(player, avatar_performance=perf)
+
+def _apply_avatar_perf(players: list[InstancePlayer]) -> list[InstancePlayer]:
+    return [_player_with_avatar_perf(player) for player in players]
+
+def get_avatar_performance(session: VRChatSession, avatar_id: str) -> str | None:
+    avatar_id = (avatar_id or '').strip()
+    if not avatar_id:
+        return None
+    cached = _AVATAR_PERF_CACHE.get(avatar_id)
+    if cached:
+        return cached
+    try:
+        with make_api_client(session) as api_client:
+            avatar = avatars_api.AvatarsApi(api_client).get_avatar(avatar_id)
+        result = _avatar_from_api(avatar)
+        if result.performance:
+            _AVATAR_PERF_CACHE[avatar_id] = result.performance
+        return result.performance
+    except Exception:
+        logger.debug('Could not fetch avatar performance for %s', avatar_id, exc_info=True)
+        return None
 
 def _instance_label_from_location(location: str | None) -> str | None:
     if not location:
@@ -662,8 +813,9 @@ def _fetch_friend_users(api: friends_api.FriendsApi, *, include_offline: bool=Tr
             try:
                 batch = api.get_friends(offset=offset, n=100, offline=offline) or []
             except (UnauthorizedException, ApiException) as exc:
-                if getattr(exc, 'status', None) == 401:
-                    return []
+                auth_error = auth_session_error_from_api(exc)
+                if auth_error is not None:
+                    raise auth_error
                 raise
             if not batch:
                 break
@@ -710,22 +862,22 @@ def get_friends_list(session: VRChatSession, *, include_offline: bool=True, enri
             if thumb:
                 _USER_THUMB_CACHE[friend.user_id] = thumb
             _USER_TRUST_CACHE[friend.user_id] = friend.trust
+            _USER_STATUS_CACHE[friend.user_id] = friend.status
         return friends
     except AuthSessionError:
         raise
     except (UnauthorizedException, ApiException) as exc:
         _raise_api_error(exc)
-    except Exception:
-        logger.debug('Could not load friends list', exc_info=True)
-        return []
+    except Exception as exc:
+        logger.warning('Could not load friends list', exc_info=True)
+        raise RuntimeError('Could not load friends list.') from exc
 
 def get_current_user_profile(session: VRChatSession) -> CurrentUserProfile | None:
     _, log_location = log_players_for_current_room()
     try:
         with make_api_client(session) as api_client:
-            auth = authentication_api.AuthenticationApi(api_client)
             try:
-                me = auth.get_current_user()
+                me = _get_current_user(api_client)
             except AuthSessionError:
                 raise
             except (UnauthorizedException, ApiException) as exc:
@@ -765,9 +917,8 @@ def get_current_instance(session: VRChatSession, *, max_enrich_requests: int=8, 
     sync_live_log_avatars(avatar_ids)
     try:
         with make_api_client(session) as api_client:
-            auth = authentication_api.AuthenticationApi(api_client)
             try:
-                me = auth.get_current_user()
+                me = _get_current_user(api_client)
             except (UnauthorizedException, ApiException) as exc:
                 if getattr(exc, 'status', None) == 401:
                     logger.debug('VRChat auth expired or missing for instance lookup')
@@ -793,6 +944,8 @@ def get_current_instance(session: VRChatSession, *, max_enrich_requests: int=8, 
                 if getattr(exc, 'status', None) == 401:
                     return get_current_instance_log_only(session)
                 instance = None
+            owner_display_name = ''
+            max_players: int | None = None
             if instance is not None:
                 world = getattr(instance, 'world', None)
                 if world is not None:
@@ -807,19 +960,23 @@ def get_current_instance(session: VRChatSession, *, max_enrich_requests: int=8, 
                 api_count = int(getattr(instance, 'user_count', 0) or getattr(instance, 'n_users', 0) or len(api_players))
                 if not location:
                     location = str(getattr(instance, 'location', '') or '') or log_location
+                max_players = int(getattr(instance, 'capacity', 0) or getattr(instance, 'recommended_capacity', 0) or 0) or None
+                owner_display_name = str(getattr(instance, 'display_name', '') or '').strip()
             friend_players = _players_from_friends(api_client, location or '', cache_only=friend_players_cache_only)
             api_friend_ids = {player.user_id for player in api_players if player.is_friend}
             api_friend_ids.update((player.user_id for player in friend_players))
             log_enriched = [_instance_player_from_log(player, is_friend=player.user_id in api_friend_ids, avatar_id=avatar_ids.get(player.user_id)) for player in log_players]
             me_player = _instance_player_from_limited(me, avatar_id=avatar_ids.get(str(getattr(me, 'id', '') or session.user_id)))
             players = _merge_players(api_players, friend_players, log_enriched, [me_player])
-            players = _apply_cached_thumbnails(players)
+            players = apply_cached_thumbnails(players)
             players = _apply_cached_trust(players)
             players = _enrich_players_from_api(api_client, players, session=session, max_requests=max_enrich_requests)
             _remember_player_thumbnails(players)
             _remember_player_trust(players)
+            _remember_player_status(players)
+            players = _apply_avatar_perf(players)
             count = max(api_count, len(players), len(log_players))
-            return InstanceInfo(world_id=world_id, instance_id=instance_id, world_name=world_name, player_count=count, players=players, owner_id=owner_id, can_close_instance=owner_id == session.user_id, region=region, instance_type=instance_type)
+            return _build_instance_info(world_id, instance_id, world_name=world_name, player_count=count, players=players, owner_id=owner_id, can_close_instance=owner_id == session.user_id, region=region, instance_type=instance_type, owner_display_name=owner_display_name, max_players=max_players)
     except Exception:
         logger.debug('Could not load current instance', exc_info=True)
         return get_current_instance_log_only(session)
@@ -827,7 +984,7 @@ def get_current_instance(session: VRChatSession, *, max_enrich_requests: int=8, 
 def enrich_instance_players(session: VRChatSession, players: list[InstancePlayer], *, max_requests: int=12, priority_user_ids: set[str] | None=None) -> list[InstancePlayer]:
     if not players:
         return players
-    players = _apply_cached_thumbnails(players)
+    players = apply_cached_thumbnails(players)
     if max_requests <= 0:
         return players
     missing = sum((1 for player in players if not player.thumbnail_url))
@@ -857,11 +1014,13 @@ def _api_error_message(exc: Exception) -> str:
     return str(exc) or 'Request failed.'
 
 def select_avatar(session: VRChatSession, avatar_id: str) -> str:
+    check_cancelled()
     if not avatar_id:
         raise ValueError('Avatar ID is required.')
     with make_api_client(session) as api_client:
         api = avatars_api.AvatarsApi(api_client)
         try:
+            check_cancelled()
             api.select_avatar(avatar_id)
         except (UnauthorizedException, ApiException) as exc:
             raise RuntimeError(_api_error_message(exc)) from exc
@@ -953,6 +1112,56 @@ def lookup_avatar_id_by_name(avatar_name: str, author_name: str | None=None, *, 
         picked = _pick_best_avatar_match(list(merged.values()), avatar_name, author_name=author_name, user_id=user_id, image_file_id=image_file_id)
         if picked:
             return picked
+    return None
+
+def _lookup_author_id_by_display_name(session: VRChatSession, display_name: str) -> str | None:
+    display_name = display_name.strip()
+    if len(display_name) < 2:
+        return None
+    cache_key = display_name.casefold()
+    cached = _AUTHOR_DISPLAY_ID_CACHE.get(cache_key)
+    if cached:
+        return cached
+    try:
+        with make_api_client(session) as api_client:
+            api = users_api.UsersApi(api_client)
+            users = api.search_users(search=display_name, n=10) or []
+    except Exception:
+        logger.debug('Author search failed for %r', display_name, exc_info=True)
+        return None
+    target = display_name.casefold()
+    exact = [user for user in users if str(getattr(user, 'display_name', '') or '').strip().casefold() == target]
+    author_id = ''
+    if len(exact) == 1:
+        author_id = str(getattr(exact[0], 'id', '') or '')
+    elif len(users) == 1:
+        author_id = str(getattr(users[0], 'id', '') or '')
+    if author_id:
+        _AUTHOR_DISPLAY_ID_CACHE[cache_key] = author_id
+        return author_id
+    return None
+
+def lookup_avatar_id_by_log_author(session: VRChatSession, avatar_name: str, author_display_name: str) -> str | None:
+    avatar_name = avatar_name.strip()
+    author_display_name = author_display_name.strip()
+    if len(avatar_name) < 2 or len(author_display_name) < 2:
+        return None
+    author_id = _lookup_author_id_by_display_name(session, author_display_name)
+    if not author_id:
+        return None
+    results = lookup_avatars_by_author_first_hit(author_id)
+    if not results:
+        return None
+    return _pick_best_avatar_match(results, avatar_name, author_name=author_display_name, user_id=author_id)
+
+def _resolve_from_log_avatar_info(session: VRChatSession | None, live_info: PlayerAvatarInfo, wearer_user_id: str, *, allow_name_search: bool) -> str | None:
+    if not live_info.avatar_name or not allow_name_search:
+        return None
+    resolved = lookup_avatar_id_by_name(live_info.avatar_name, live_info.author_name or None, user_id=wearer_user_id)
+    if resolved:
+        return resolved
+    if session is not None and live_info.author_name:
+        return lookup_avatar_id_by_log_author(session, live_info.avatar_name, live_info.author_name)
     return None
 
 def _is_robot_placeholder_file_id(file_id: str | None) -> bool:
@@ -1070,6 +1279,7 @@ def _resolve_avatar_from_thumbnail_file(session: VRChatSession, user_id: str, fi
     return _lookup_avatar_id_by_owner_match(avatar_name, user_id, image_file_id=file_id)
 
 def _resolve_avatar_id_from_instance_presence(session: VRChatSession, user_id: str, display_name: str | None=None, *, skip_name_search: bool=False) -> str | None:
+    check_cancelled()
     log_players, log_location = log_players_for_current_room()
     in_log = user_id in {player.user_id for player in log_players}
     my_location = log_location
@@ -1117,6 +1327,7 @@ def _resolve_avatar_id_from_instance_presence(session: VRChatSession, user_id: s
 _JOIN_FOR_CURRENT_AVATAR = 'Join their instance to get their current avatar. VRChat does not expose their latest avatar unless you are in-world together.'
 
 def _resolve_avatar_id_from_user_api(session: VRChatSession, user_id: str, *, allow_cached_fallback: bool=True, skip_name_search: bool=False) -> str | None:
+    check_cancelled()
     cached = _AVATAR_RESOLVE_CACHE.get(user_id)
     now = time.monotonic()
     if cached is not None and now - cached[0] < _AVATAR_RESOLVE_CACHE_TTL_SEC:
@@ -1157,14 +1368,16 @@ def _resolve_avatar_id_from_user_api(session: VRChatSession, user_id: str, *, al
     _AVATAR_RESOLVE_CACHE[user_id] = (now, resolved)
     return resolved
 
-def _force_clone_failure_reason(session: VRChatSession, user_id: str) -> str:
-    del session, user_id
-    return _JOIN_FOR_CURRENT_AVATAR
-
-def resolve_player_avatar_id(user_id: str, display_name: str | None=None, *, session: VRChatSession | None=None, for_force_clone: bool=False) -> str | None:
+def resolve_player_avatar_id(user_id: str, display_name: str | None=None, *, session: VRChatSession | None=None, for_force_clone: bool=False, force_clone_mode: ForceCloneMode | None=None) -> str | None:
+    check_cancelled()
     live_map = parse_avatar_ids_from_log()
     sync_live_log_avatars(live_map)
     in_current_room = user_id in current_room_user_ids()
+    if for_force_clone and force_clone_mode is None:
+        force_clone_mode = 'in_room' if in_current_room else 'remote'
+    strict_remote = for_force_clone and force_clone_mode == 'remote'
+    allow_name_search = not strict_remote
+    allow_cached_fallback = not strict_remote
     live_avatar_id = live_map.get(user_id)
     if live_avatar_id:
         return live_avatar_id
@@ -1172,30 +1385,32 @@ def resolve_player_avatar_id(user_id: str, display_name: str | None=None, *, ses
     if live_info.avatar_id:
         sync_live_log_avatars({user_id: live_info.avatar_id})
         return live_info.avatar_id
-    if live_info.avatar_name and in_current_room and (not for_force_clone):
-        resolved = lookup_avatar_id_by_name(live_info.avatar_name, live_info.author_name or None, user_id=user_id)
+    if live_info.avatar_name and in_current_room and allow_name_search:
+        resolved = _resolve_from_log_avatar_info(session, live_info, user_id, allow_name_search=allow_name_search)
         if resolved:
             set_cached_avatar_id(user_id, resolved, source='log_name')
             return resolved
     if session is not None and (not in_current_room):
-        api_resolved = _resolve_avatar_id_from_user_api(session, user_id, allow_cached_fallback=not for_force_clone, skip_name_search=for_force_clone)
+        check_cancelled()
+        api_resolved = _resolve_avatar_id_from_user_api(session, user_id, allow_cached_fallback=allow_cached_fallback, skip_name_search=strict_remote)
         if api_resolved:
             return api_resolved
-        instance_resolved = _resolve_avatar_id_from_instance_presence(session, user_id, display_name, skip_name_search=for_force_clone)
+        instance_resolved = _resolve_avatar_id_from_instance_presence(session, user_id, display_name, skip_name_search=strict_remote)
         if instance_resolved:
             return instance_resolved
         if for_force_clone:
             return None
     if session is not None and in_current_room:
-        if live_info.avatar_name and (not for_force_clone):
-            resolved = lookup_avatar_id_by_name(live_info.avatar_name, live_info.author_name or None, user_id=user_id)
+        check_cancelled()
+        if live_info.avatar_name and allow_name_search:
+            resolved = _resolve_from_log_avatar_info(session, live_info, user_id, allow_name_search=allow_name_search)
             if resolved:
                 set_cached_avatar_id(user_id, resolved, source='log_name')
                 return resolved
-        instance_resolved = _resolve_avatar_id_from_instance_presence(session, user_id, display_name, skip_name_search=for_force_clone)
+        instance_resolved = _resolve_avatar_id_from_instance_presence(session, user_id, display_name, skip_name_search=strict_remote)
         if instance_resolved:
             return instance_resolved
-        api_resolved = _resolve_avatar_id_from_user_api(session, user_id, allow_cached_fallback=not for_force_clone, skip_name_search=for_force_clone)
+        api_resolved = _resolve_avatar_id_from_user_api(session, user_id, allow_cached_fallback=allow_cached_fallback, skip_name_search=strict_remote)
         if api_resolved:
             return api_resolved
     if for_force_clone:
@@ -1215,24 +1430,139 @@ def resolve_player_avatar_id(user_id: str, display_name: str | None=None, *, ses
             return cached
     return None
 
-def force_clone_player_avatar(session: VRChatSession, user_id: str, *, display_name: str | None=None, avatar_id: str | None=None) -> str:
+@dataclass(frozen=True)
+class ForceClonePreview:
+    available: bool
+    message: str
+
+def preview_force_clone_player(session: VRChatSession | None, user_id: str, *, display_name: str | None=None, avatar_id: str | None=None, status: UserStatusInfo | None=None, resolve: bool=False) -> ForceClonePreview:
+    in_current_room = user_id in current_room_user_ids()
+    live_id = parse_avatar_ids_from_log().get(user_id)
+    if live_id and str(live_id).strip().startswith('avtr_'):
+        return ForceClonePreview(True, 'Avatar ID available from VRChat log')
+    if in_current_room:
+        live_info = lookup_player_avatar_info(user_id, display_name)
+        if live_info.avatar_id and str(live_info.avatar_id).strip().startswith('avtr_'):
+            return ForceClonePreview(True, 'Avatar ID available from VRChat log')
+        if live_info.avatar_name:
+            return ForceClonePreview(True, f'Avatar "{live_info.avatar_name}" seen in VRChat log')
+    cached = get_cached_avatar_id(user_id, max_age_sec=FORCE_CLONE_CACHE_MAX_AGE_SEC)
+    if cached:
+        if in_current_room and not live_id:
+            return ForceClonePreview(True, 'Cached avatar (may be outdated — wait for log)')
+        return ForceClonePreview(True, 'Cached avatar ID')
+    amplitude_id = build_user_avatar_map_from_amplitude().get(user_id)
+    if amplitude_id and str(amplitude_id).strip().startswith('avtr_'):
+        return ForceClonePreview(True, 'Avatar ID from analytics cache')
+    if avatar_id and str(avatar_id).strip().startswith('avtr_'):
+        hint = 'Avatar ID available from instance'
+        if in_current_room:
+            hint = 'Instance avatar ID (may be outdated — log preferred)'
+        return ForceClonePreview(True, hint)
+    status = status or _USER_STATUS_CACHE.get(user_id)
+    if status is not None and not in_current_room:
+        if status.key == 'private':
+            return ForceClonePreview(False, 'Private — avatar is hidden')
+        if status.key in ('ask_me', 'busy', 'invisible'):
+            return ForceClonePreview(False, f'{status.label} — avatar hidden from API')
+    if resolve and session is not None:
+        mode: ForceCloneMode = 'in_room' if in_current_room else 'remote'
+        resolved = resolve_player_avatar_id(user_id, display_name, session=session, for_force_clone=True, force_clone_mode=mode)
+        if resolved:
+            return ForceClonePreview(True, 'Avatar can be resolved')
+    if in_current_room:
+        return ForceClonePreview(False, 'Avatar not in log yet — wait for download or switch')
+    return ForceClonePreview(False, _JOIN_FOR_CURRENT_AVATAR)
+
+def _force_clone_failure_reason(session: VRChatSession | None, user_id: str, *, display_name: str | None=None, avatar_id: str | None=None, status: UserStatusInfo | None=None) -> str:
+    in_current_room = user_id in current_room_user_ids()
+    if in_current_room:
+        live_info = lookup_player_avatar_info(user_id, display_name)
+        if live_info.avatar_name:
+            author_hint = f' by {live_info.author_name}' if live_info.author_name else ''
+            return f'Could not resolve avatar ID for "{live_info.avatar_name}"{author_hint}. Wait for their avatar to finish downloading, then try again.'
+    preview = preview_force_clone_player(session, user_id, display_name=display_name, avatar_id=avatar_id, status=status, resolve=False)
+    if preview.available:
+        return 'Avatar was seen in log but ID lookup failed — wait and try again.'
+    return preview.message
+
+def _valid_force_clone_avatar_id(value: str | None) -> str | None:
+    cleaned = str(value or '').strip()
+    return cleaned if cleaned.startswith('avtr_') else None
+
+def resolve_known_avatar_id(user_id: str, display_name: str | None=None, *, avatar_id: str | None=None, session: VRChatSession | None=None) -> str | None:
+    in_room = user_id in current_room_user_ids()
+    live_info = lookup_player_avatar_info(user_id, display_name)
+    candidate = _valid_force_clone_avatar_id(parse_avatar_ids_from_log().get(user_id))
+    if candidate:
+        return candidate
+    candidate = _valid_force_clone_avatar_id(live_info.avatar_id)
+    if candidate:
+        return candidate
+    if session is not None and live_info.avatar_name:
+        if live_info.author_name:
+            resolved = lookup_avatar_id_by_log_author(session, live_info.avatar_name, live_info.author_name)
+            if resolved:
+                return resolved
+        resolved = lookup_avatar_id_by_name(live_info.avatar_name, live_info.author_name, user_id=user_id)
+        if resolved:
+            return resolved
+    instance_candidate = _valid_force_clone_avatar_id(avatar_id)
+    if instance_candidate and not in_room:
+        return instance_candidate
+    if instance_candidate and in_room and not live_info.avatar_name:
+        return instance_candidate
+    candidate = _valid_force_clone_avatar_id(get_recent_avatar_id_for_copy(user_id, in_room=in_room))
+    if candidate:
+        return candidate
+    candidate = _valid_force_clone_avatar_id(build_user_avatar_map_from_amplitude().get(user_id))
+    if candidate and not in_room:
+        return candidate
+    return instance_candidate if not in_room else None
+
+def _complete_force_clone(session: VRChatSession, user_id: str, resolved: str) -> str:
+    set_cached_avatar_id(user_id, resolved, source='force_clone')
+    _AVATAR_RESOLVE_CACHE.pop(user_id, None)
+    return select_avatar(session, resolved)
+
+def force_clone_player_avatar(session: VRChatSession, user_id: str, *, display_name: str | None=None, avatar_id: str | None=None, status: UserStatusInfo | None=None) -> str:
+    check_cancelled()
     if not user_id:
         raise ValueError('User ID is required.')
-
-    def _valid_avatar_id(value: str | None) -> str | None:
-        cleaned = str(value or '').strip()
-        return cleaned if cleaned.startswith('avtr_') else None
-    for candidate in (avatar_id, parse_avatar_ids_from_log().get(user_id), get_cached_avatar_id(user_id)):
-        resolved = _valid_avatar_id(candidate)
+    invalidate_log_cache()
+    in_current_room = user_id in current_room_user_ids()
+    force_clone_mode: ForceCloneMode = 'in_room' if in_current_room else 'remote'
+    if in_current_room:
+        check_cancelled()
+        live_id = _valid_force_clone_avatar_id(parse_avatar_ids_from_log().get(user_id))
+        if live_id:
+            return _complete_force_clone(session, user_id, live_id)
+        check_cancelled()
+        resolved = resolve_player_avatar_id(user_id, display_name, session=session, for_force_clone=True, force_clone_mode=force_clone_mode)
         if resolved:
-            set_cached_avatar_id(user_id, resolved, source='force_clone')
-            return select_avatar(session, resolved)
-    resolved = resolve_player_avatar_id(user_id, display_name, session=session, for_force_clone=True)
-    if not resolved:
-        reason = _force_clone_failure_reason(session, user_id) if session else _JOIN_FOR_CURRENT_AVATAR
-        raise RuntimeError(reason)
-    set_cached_avatar_id(user_id, resolved, source='force_clone')
-    return select_avatar(session, resolved)
+            return _complete_force_clone(session, user_id, resolved)
+    check_cancelled()
+    instance_id = _valid_force_clone_avatar_id(avatar_id)
+    if instance_id and not in_current_room:
+        return _complete_force_clone(session, user_id, instance_id)
+    if not in_current_room:
+        check_cancelled()
+        resolved = resolve_player_avatar_id(user_id, display_name, session=session, for_force_clone=True, force_clone_mode=force_clone_mode)
+        if resolved:
+            return _complete_force_clone(session, user_id, resolved)
+    elif instance_id:
+        return _complete_force_clone(session, user_id, instance_id)
+    check_cancelled()
+    amplitude_id = _valid_force_clone_avatar_id(build_user_avatar_map_from_amplitude().get(user_id))
+    if amplitude_id:
+        set_cached_avatar_id(user_id, amplitude_id, source='amplitude')
+        return _complete_force_clone(session, user_id, amplitude_id)
+    check_cancelled()
+    cached_id = _valid_force_clone_avatar_id(get_cached_avatar_id(user_id, max_age_sec=FORCE_CLONE_CACHE_MAX_AGE_SEC))
+    if cached_id:
+        return _complete_force_clone(session, user_id, cached_id)
+    reason = _force_clone_failure_reason(session, user_id, display_name=display_name, avatar_id=avatar_id, status=status)
+    raise RuntimeError(reason)
 
 def favorite_avatar(session: VRChatSession, avatar_id: str, *, group: str=DEFAULT_AVATAR_FAVORITE_GROUP) -> str:
     if not avatar_id:
@@ -1245,3 +1575,112 @@ def favorite_avatar(session: VRChatSession, avatar_id: str, *, group: str=DEFAUL
         except (UnauthorizedException, ApiException) as exc:
             raise RuntimeError(_api_error_message(exc)) from exc
     return f'Favorited avatar to {group}.'
+
+def list_favorite_avatar_ids(session: VRChatSession, *, limit: int=1000) -> list[str]:
+    favorite_ids: list[str] = []
+    seen: set[str] = set()
+    with make_api_client(session) as api_client:
+        api = favorites_api.FavoritesApi(api_client)
+        offset = 0
+        while len(favorite_ids) < limit and offset < 500:
+            try:
+                batch = api.get_favorites(n=min(100, limit - len(favorite_ids)), offset=offset, type=FavoriteType.AVATAR) or []
+            except (UnauthorizedException, ApiException) as exc:
+                raise RuntimeError(_api_error_message(exc)) from exc
+            if not batch:
+                break
+            for fav in batch:
+                avatar_id = str(getattr(fav, 'favorite_id', '') or '').strip()
+                if not avatar_id.startswith('avtr_') or avatar_id in seen:
+                    continue
+                seen.add(avatar_id)
+                favorite_ids.append(avatar_id)
+            if len(batch) < 100:
+                break
+            offset += len(batch)
+    return favorite_ids
+
+def wardrobe_avatar_placeholder(avatar_id: str) -> AvatarResult:
+    from ..wardrobe_cache import get_cached_avatar
+    cached = get_cached_avatar(avatar_id)
+    if cached is not None:
+        return cached
+    short = avatar_id.replace('avtr_', '')[:8]
+    return AvatarResult(id=avatar_id, name=f'Avatar …{short}', description='', author_name='', image_url='')
+
+def enrich_wardrobe_avatar(session: VRChatSession, avatar_id: str, *, allow_vrc_fallback: bool=True) -> AvatarResult:
+    from ..wardrobe_cache import get_cached_avatar, store_avatar
+    cached = get_cached_avatar(avatar_id)
+    if cached is not None and cached.image_url and cached.name and (not cached.name.startswith('Avatar …')):
+        return cached
+    external = lookup_avatar_by_id_external(avatar_id)
+    if external is not None:
+        name = (external.name or '').strip()
+        has_name = bool(name) and not name.startswith('Avatar …')
+        if external.image_url or has_name:
+            store_avatar(external)
+            if external.image_url or not allow_vrc_fallback:
+                return external
+    if not allow_vrc_fallback:
+        return external or wardrobe_avatar_placeholder(avatar_id)
+    with make_api_client(session) as api_client:
+        avatar = avatars_api.AvatarsApi(api_client).get_avatar(avatar_id)
+    result = _avatar_from_api(avatar)
+    store_avatar(result)
+    return result
+
+def get_favorite_avatars(session: VRChatSession, *, limit: int=100) -> list[AvatarResult]:
+    return [wardrobe_avatar_placeholder(avatar_id) for avatar_id in list_favorite_avatar_ids(session, limit=limit)]
+
+def invite_user_to_instance(session: VRChatSession, user_id: str, *, world_id: str, instance_id: str, message_slot: int=0) -> str:
+    if not user_id:
+        raise ValueError('User ID is required.')
+    if not instance_id:
+        raise ValueError('Instance ID is required.')
+    request = InviteRequest(instance_id=instance_id, message_slot=message_slot)
+    with make_api_client(session) as api_client:
+        api = invite_api.InviteApi(api_client)
+        try:
+            api.invite_user(user_id, invite_request=request)
+        except (UnauthorizedException, ApiException) as exc:
+            raise RuntimeError(_api_error_message(exc)) from exc
+    return f'Invite sent to {user_id}.'
+
+_POLL_NOTIFICATION_TYPES = frozenset({'friendRequest', 'invite', 'requestInvite', 'inviteResponse', 'requestInviteResponse'})
+
+def get_pending_notifications(session: VRChatSession) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    with make_api_client(session) as api_client:
+        api = notifications_api.NotificationsApi(api_client)
+        try:
+            batch = api.get_notifications() or []
+        except (UnauthorizedException, ApiException) as exc:
+            raise RuntimeError(_api_error_message(exc)) from exc
+    for notif in batch:
+        notif_type = str(getattr(getattr(notif, 'type', None), 'value', None) or getattr(notif, 'type', '') or '')
+        if notif_type not in _POLL_NOTIFICATION_TYPES:
+            continue
+        if bool(getattr(notif, 'seen', False)):
+            continue
+        details_raw = getattr(notif, 'details', None)
+        world_name = ''
+        if details_raw:
+            try:
+                details = json.loads(details_raw) if isinstance(details_raw, str) else details_raw
+                if isinstance(details, dict):
+                    world_name = str(details.get('worldName') or details.get('world_name') or '')
+            except Exception:
+                pass
+        items.append({'id': str(getattr(notif, 'id', '') or ''), 'type': notif_type, 'sender_username': str(getattr(notif, 'sender_username', '') or ''), 'sender_user_id': str(getattr(notif, 'sender_user_id', '') or ''), 'message': str(getattr(notif, 'message', '') or ''), 'world_name': world_name})
+    return items
+
+def accept_friend_request(session: VRChatSession, notification_id: str) -> str:
+    if not notification_id:
+        raise ValueError('Notification ID is required.')
+    with make_api_client(session) as api_client:
+        api = notifications_api.NotificationsApi(api_client)
+        try:
+            api.accept_friend_request(notification_id)
+        except (UnauthorizedException, ApiException) as exc:
+            raise RuntimeError(_api_error_message(exc)) from exc
+    return 'Friend request accepted.'

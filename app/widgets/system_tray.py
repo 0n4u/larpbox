@@ -3,6 +3,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QWidget
 from ..theme import MENU
+from ..version import __version__
 
 def build_app_icon() -> QIcon:
     icon = QIcon()
@@ -45,6 +46,20 @@ class AppSystemTray:
         self.window = window
         self.app = app
         self.tray: QSystemTrayIcon | None = None
+        self._minimize_hint_shown = False
+
+    @staticmethod
+    def is_available() -> bool:
+        return QSystemTrayIcon.isSystemTrayAvailable()
+
+    def is_active(self) -> bool:
+        return self.tray is not None
+
+    def show_minimized_hint(self) -> None:
+        if self.tray is None or self._minimize_hint_shown:
+            return
+        self._minimize_hint_shown = True
+        self.tray.showMessage('larpbox', 'Still running in the tray. Double-click the icon to reopen.', QSystemTrayIcon.MessageIcon.Information, 3000)
 
     def setup(self) -> None:
         if not QSystemTrayIcon.isSystemTrayAvailable():
@@ -52,7 +67,7 @@ class AppSystemTray:
         icon = build_app_icon()
         self.app.setWindowIcon(icon)
         self.tray = QSystemTrayIcon(icon, self.app)
-        self.tray.setToolTip('larpbox — VRChat companion\nDouble-click to show or hide')
+        self.tray.setToolTip(f'larpbox v{__version__} — VRChat companion\nDouble-click to show or hide')
         menu = QMenu()
         menu.setStyleSheet(MENU + '\n            QMenu {\n                min-width: 196px;\n                padding: 6px;\n            }\n            QMenu::item {\n                padding: 8px 18px 8px 14px;\n                margin: 2px 0;\n            }\n            QMenu::separator {\n                margin: 6px 10px;\n            }\n        ')
         menu.aboutToShow.connect(self._sync_menu_state)

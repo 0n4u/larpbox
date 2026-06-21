@@ -5,7 +5,7 @@ from .frameless_chrome import apply_frameless_chrome
 from .preset_storage import load_presets, save_presets
 from .theme import dark_theme
 from .title_bar import TitleBar
-from .ui_animations import pop_in_widget
+from .ui_animations import pop_in_widget, window_fade_in
 
 class PresetManagerWindow(QWidget):
     presets_saved = pyqtSignal()
@@ -15,6 +15,7 @@ class PresetManagerWindow(QWidget):
         self.setWindowTitle('')
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setWindowOpacity(0.0)
         self.setFixedSize(560, 420)
         self.presets: dict[str, list[str]] = {}
         self.current_preset: str | None = None
@@ -113,7 +114,8 @@ class PresetManagerWindow(QWidget):
         apply_frameless_chrome(self)
         if not self._intro_animated:
             self._intro_animated = True
-            pop_in_widget(self.container, duration=260)
+            window_fade_in(self, duration=340)
+            pop_in_widget(self.container, duration=300)
 
     def closeEvent(self, event) -> None:
         event.accept()

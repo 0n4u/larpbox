@@ -48,8 +48,13 @@ def _filter_avtrdb_performance(results: list[AvatarResult], rating: str) -> list
     return [item for item in results if (item.performance or '') == rating]
 
 def _filter_avtrdb_platform(results: list[AvatarResult], platform: str) -> list[AvatarResult]:
-    _ = platform
-    return results
+    def matches(item: AvatarResult) -> bool:
+        if item.platforms:
+            return platform in item.platforms
+        if platform == 'pc' and item.performance:
+            return True
+        return False
+    return [item for item in results if matches(item)]
 
 def _sort_avtrdb(results: list[AvatarResult], *, by_name: bool) -> list[AvatarResult]:
     if by_name:
@@ -178,7 +183,7 @@ def _search_combined(session: VRChatSession | None, query: str, filter_id: str, 
     notice = ' · '.join(notice_parts) if notice_parts else None
     has_more = len(all_results) > offset + limit or bool(saturated)
     return AvatarSearchOutcome(results=page, notice=notice, has_more=has_more)
-_AVTRDB_FILTERS = (AvatarSearchFilter('all', 'All results'), AvatarSearchFilter('perf_Excellent', 'PC: Excellent'), AvatarSearchFilter('perf_Good', 'PC: Good'), AvatarSearchFilter('perf_Medium', 'PC: Medium'), AvatarSearchFilter('perf_Poor', 'PC: Poor'), AvatarSearchFilter('perf_VeryPoor', 'PC: Very Poor'), AvatarSearchFilter('sort_name', 'Sort by name'), AvatarSearchFilter('sort_updated', 'Sort by PC rating'))
+_AVTRDB_FILTERS = (AvatarSearchFilter('all', 'All results'), AvatarSearchFilter('perf_Excellent', 'PC: Excellent'), AvatarSearchFilter('perf_Good', 'PC: Good'), AvatarSearchFilter('perf_Medium', 'PC: Medium'), AvatarSearchFilter('perf_Poor', 'PC: Poor'), AvatarSearchFilter('perf_VeryPoor', 'PC: Very Poor'), AvatarSearchFilter('platform_pc', 'Platform: PC'), AvatarSearchFilter('platform_android', 'Platform: Android'), AvatarSearchFilter('platform_ios', 'Platform: iOS'), AvatarSearchFilter('sort_name', 'Sort by name'), AvatarSearchFilter('sort_updated', 'Sort by PC rating'))
 _COMBINED_FILTERS = _AVTRDB_FILTERS + (AvatarSearchFilter('featured', 'VRChat: Featured'), AvatarSearchFilter('mine_all', 'VRChat: My avatars'))
 _VRCX_MIRROR_FILTERS = (AvatarSearchFilter('all', 'All results'),)
 _VRCHAT_FILTERS = (AvatarSearchFilter('featured', 'Featured avatars'), AvatarSearchFilter('featured_recent', 'Featured (newest)'), AvatarSearchFilter('mine_all', 'My avatars (all)'), AvatarSearchFilter('mine_public', 'My avatars (public)'), AvatarSearchFilter('mine_private', 'My avatars (private)'))

@@ -10,7 +10,7 @@ from .image_loader import RemoteImageLabel
 from .logging_setup import get_logger, is_debug_mode
 from .services.session_manager import SessionManager
 from .theme import dark_theme, themed_menu
-from .ui_animations import pulse_widget, stagger_fade_in, stop_pulse, stop_widget_animations
+from .ui_animations import flash_widget, pop_in_widget, pulse_widget, stagger_pop_in, stop_pulse, stop_widget_animations
 from .vrchat_api import AvatarResult, avatar_profile_url, enrich_avatar_description, favorite_avatar, select_avatar
 from .vrchat_auth import VRChatSession
 logger = get_logger('avatar_search')
@@ -79,24 +79,33 @@ class AvatarCard(QFrame):
         self.desc_label.setText(self._subtitle(self.avatar))
 
     def _show_context_menu(self, pos) -> None:
-        menu = themed_menu(self)
-        if self.session and self.avatar.id:
-            wear = menu.addAction('Wear Avatar')
-            wear.triggered.connect(lambda: self.action_requested.emit('wear', self.avatar.id))
-            favorite = menu.addAction('Favorite Avatar')
-            favorite.triggered.connect(lambda: self.action_requested.emit('favorite', self.avatar.id))
-            menu.addSeparator()
-        if self.avatar.author_id:
-            author = menu.addAction('Browse author avatars')
-            author.triggered.connect(lambda: self.action_requested.emit('author', self.avatar.author_id))
-        if self.avatar.id:
-            copy_id = menu.addAction('Copy Avatar ID')
-            copy_id.triggered.connect(lambda: self.action_requested.emit('copy_id', self.avatar.id))
-            open_profile = menu.addAction('Open on VRChat.com')
-            open_profile.triggered.connect(lambda: self.action_requested.emit('open', self.avatar.id))
-        if menu.isEmpty():
-            return
-        menu.exec(self.mapToGlobal(pos))
+        menu = None
+        try:
+            menu = themed_menu(self)
+            if self.session and self.avatar.id:
+                wear = menu.addAction('Wear Avatar')
+                wear.triggered.connect(lambda: self.action_requested.emit('wear', self.avatar.id))
+                favorite = menu.addAction('Favorite Avatar')
+                favorite.triggered.connect(lambda: self.action_requested.emit('favorite', self.avatar.id))
+                menu.addSeparator()
+            if self.avatar.author_id:
+                author = menu.addAction('Browse author avatars')
+                author.triggered.connect(lambda: self.action_requested.emit('author', self.avatar.author_id))
+            if self.avatar.id:
+                copy_id = menu.addAction('Copy Avatar ID')
+                copy_id.triggered.connect(lambda: self.action_requested.emit('copy_id', self.avatar.id))
+                open_profile = menu.addAction('Open on VRChat.com')
+                open_profile.triggered.connect(lambda: self.action_requested.emit('open', self.avatar.id))
+            if menu.isEmpty():
+                return
+            menu.exec(self.mapToGlobal(pos))
+        except Exception as e:
+            from .logging_setup import get_logger
+            logger = get_logger('avatar_search')
+            logger.error('Context menu failed for avatar %s: %s', self.avatar.name, e, exc_info=True)
+        finally:
+            if menu is not None:
+                menu.deleteLater()
 
 class AvatarSearchWorker(QThread):
     finished_ok = pyqtSignal(int, object)
@@ -134,9 +143,10 @@ class DescriptionWorker(QThread):
 
 class AvatarSearchPanel(QWidget):
 
-    def __init__(self, session: VRChatSession | None=None, parent: QWidget | None=None):
+    def __init__(self, session: VRChatSession | None=None, parent: QWidget | None=None, *, tabbed: bool=False):
         super().__init__(parent)
         self.session = session
+        self._tabbed = tabbed
         self._provider = get_provider()
         self._filter_id = default_filter_for(self._provider)
         self._worker: AvatarSearchWorker | None = None
@@ -153,8 +163,11 @@ class AvatarSearchPanel(QWidget):
         self._loading_more = False
         if session is not None:
             RemoteImageLabel.set_session(session)
-        self.setFixedWidth(308)
-        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        if not self._tabbed:
+            self.setFixedWidth(308)
+            self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        else:
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._build_ui()
         self._refresh_status_hint()
 
@@ -162,13 +175,20 @@ class AvatarSearchPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.container = QWidget()
-        self.container.setObjectName('roundContainer')
-        inner = QVBoxLayout(self.container)
-        inner.setContentsMargins(8, 8, 8, 8)
-        group = QGroupBox('Avatar Search')
-        group_layout = QVBoxLayout()
-        group_layout.setContentsMargins(10, 10, 10, 8)
-        group_layout.setSpacing(6)
+        if self._tabbed:
+            inner = QVBoxLayout(self.container)
+            inner.setContentsMargins(4, 4, 4, 4)
+            inner.setSpacing(6)
+            group_layout = inner
+        else:
+            self.container.setObjectName('roundContainer')
+            inner = QVBoxLayout(self.container)
+            inner.setContentsMargins(8, 8, 8, 8)
+            inner.setSpacing(6)
+            group = QGroupBox('Avatar Search')
+            group_layout = QVBoxLayout()
+            group_layout.setContentsMargins(10, 10, 10, 8)
+            group_layout.setSpacing(6)
         search_row = QHBoxLayout()
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText('Search, avtr_… or usr_…')
@@ -201,8 +221,9 @@ class AvatarSearchPanel(QWidget):
         self.results_layout.addWidget(self.empty_label, 1)
         self.scroll.setWidget(self.results_host)
         group_layout.addWidget(self.scroll, 1)
-        group.setLayout(group_layout)
-        inner.addWidget(group)
+        if not self._tabbed:
+            group.setLayout(group_layout)
+            inner.addWidget(group)
         layout.addWidget(self.container)
         self.setStyleSheet(dark_theme('\n            QLabel#panelStatus { color: #7a8a7a; font-size: 8pt; }\n            QLabel#emptyState { color: #6a7a6a; font-size: 9pt; padding: 24px 12px; }\n            QFrame#avatarCard {\n                background-color: #232323;\n                border: 1px solid #3a3a3a;\n                border-radius: 8px;\n            }\n            QFrame#avatarCard:hover { border-color: #4ea3ff; }\n            QLabel#avatarName { color: #f0f0f0; font-weight: 600; font-size: 9pt; }\n            QLabel#avatarDesc { color: #9aa0a6; font-size: 8pt; }\n        '))
 
@@ -266,7 +287,11 @@ class AvatarSearchPanel(QWidget):
 
     def _show_empty_state(self, message: str) -> None:
         self.empty_label.setText(message)
-        self.empty_label.show()
+        if self.empty_label.isVisible():
+            flash_widget(self.empty_label, duration=220, dip=0.6)
+        else:
+            self.empty_label.show()
+            pop_in_widget(self.empty_label, duration=260)
 
     def _show_filter_menu(self) -> None:
         menu = themed_menu(self)
@@ -390,7 +415,7 @@ class AvatarSearchPanel(QWidget):
                     worker.start()
                     self._desc_workers.append(worker)
             if cards:
-                stagger_fade_in(cards, duration=180, step_ms=18)
+                stagger_pop_in(cards, duration=200, step_ms=16)
         except Exception as exc:
             logger.warning('Avatar search results UI failed: %s', exc, exc_info=is_debug_mode())
             self._on_error(generation, str(exc) or 'Failed to show search results.')

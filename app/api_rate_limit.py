@@ -2,7 +2,8 @@ from __future__ import annotations
 import threading
 import time
 from typing import Any, Callable, TypeVar
-from .logging_setup import get_logger
+from .logging_setup import get_logger, is_debug_mode, debug_event
+from .action_cancel import check_cancelled
 logger = get_logger('api_rate_limit')
 T = TypeVar('T')
 _DEFAULT_MIN_INTERVAL = 0.5
@@ -34,6 +35,7 @@ class ApiRateLimiter:
 
     def wait(self) -> None:
         while True:
+            check_cancelled()
             with self._lock:
                 now = time.monotonic()
                 if now < self._cooldown_until:
@@ -48,7 +50,10 @@ class ApiRateLimiter:
                         self._last_request = now
                         self._request_times.append(now)
                         return
+                if is_debug_mode() and delay > 0:
+                    debug_event(logger, 'rate limiter waiting', delay_sec=round(delay, 2), minute_count=len(self._request_times))
             time.sleep(min(max(delay, 0.05), 15.0))
+            check_cancelled()
 
     def note_rate_limited(self, *, retry_after: float=_DEFAULT_COOLDOWN_SEC) -> None:
         with self._lock:

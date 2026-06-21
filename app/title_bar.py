@@ -1,4 +1,5 @@
 from PyQt6.QtCore import Qt, QPoint
+from .ui_animations import fade_out_widget, slide_fade_in_widget
 from PyQt6.QtGui import QColor, QMouseEvent
 from PyQt6.QtWidgets import QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 _CHROME_BTN = '\n    QPushButton {\n        background-color: transparent;\n        border: none;\n        padding: 0px;\n    }\n'
@@ -6,7 +7,7 @@ _CLOSE_BTN = _CHROME_BTN + '\n    QPushButton {\n        color: #e57373;\n      
 _WINDOW_BTN = _CHROME_BTN + '\n    QPushButton {\n        color: #c0c0c0;\n        font-size: 11px;\n    }\n    QPushButton:hover {\n        background-color: #404040;\n    }\n    QPushButton:pressed {\n        background-color: #303030;\n    }\n'
 _MAX_BTN = _CHROME_BTN + '\n    QPushButton {\n        color: #c0c0c0;\n        font-size: 10px;\n    }\n    QPushButton:hover {\n        background-color: #404040;\n    }\n    QPushButton:pressed {\n        background-color: #303030;\n    }\n'
 _HELP_BTN = _CHROME_BTN + '\n    QPushButton {\n        color: #9aa0a6;\n        font-size: 11px;\n    }\n    QPushButton:hover {\n        background-color: #404040;\n        color: #4ea3ff;\n    }\n    QPushButton:pressed {\n        background-color: #303030;\n    }\n    QPushButton[helpActive="true"] {\n        background-color: #404040;\n        color: #4ea3ff;\n    }\n'
-PRIVACY_HELP_LINES = (('No data stored', "We don't save any of your information."), ('Open source', 'This project is open source.'))
+PRIVACY_HELP_LINES = (('Local data only', 'Settings, presets, and caches are stored on your PC as JSON files. Login tokens are saved locally only if you enable Remember login.'), ('Open source', 'This project is open source.'))
 
 class _HelpPopover(QFrame):
 
@@ -127,8 +128,9 @@ class TitleBar(QWidget):
             self._help_popover.reposition(self.btn_help)
             self._help_popover.show()
             self._help_popover.raise_()
+            slide_fade_in_widget(self._help_popover, offset_y=8, duration=260)
         else:
-            self._help_popover.hide()
+            fade_out_widget(self._help_popover, duration=180, hide_after=True)
         self.btn_help.setProperty('helpActive', showing)
         self.btn_help.style().unpolish(self.btn_help)
         self.btn_help.style().polish(self.btn_help)

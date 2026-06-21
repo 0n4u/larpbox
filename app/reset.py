@@ -4,6 +4,7 @@ from pathlib import Path
 from .config import CONFIG_PATH, DEFAULT_CONFIG, PROJECT_ROOT, write_config
 _LOGS_DIR = PROJECT_ROOT / 'logs'
 _AVATAR_CACHE_PATH = PROJECT_ROOT / 'data' / 'avatar_cache.json'
+_WARDROBE_CACHE_PATH = PROJECT_ROOT / 'data' / 'wardrobe_cache.json'
 _ME_JSON_PATH = PROJECT_ROOT / '_me.json'
 
 def build_default_config(*, debug: bool=False) -> dict:
@@ -21,6 +22,9 @@ def reset_app_data(*, debug: bool=False) -> list[str]:
         actions.append(f'Deleted avatar cache ({_AVATAR_CACHE_PATH.relative_to(PROJECT_ROOT)})')
     else:
         _AVATAR_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if _WARDROBE_CACHE_PATH.is_file():
+        _WARDROBE_CACHE_PATH.unlink()
+        actions.append(f'Deleted wardrobe cache ({_WARDROBE_CACHE_PATH.relative_to(PROJECT_ROOT)})')
     if _LOGS_DIR.is_dir():
         cleared_logs = 0
         for log_file in _LOGS_DIR.glob('*.log'):
@@ -45,6 +49,11 @@ def reset_app_data(*, debug: bool=False) -> list[str]:
         avatar_cache._CACHE = None
     except Exception:
         pass
+    try:
+        from . import wardrobe_cache
+        wardrobe_cache._CACHE = None
+    except Exception:
+        pass
     return actions
 
 def config_is_fresh(*, debug: bool=False) -> bool:
@@ -63,4 +72,4 @@ def config_is_fresh(*, debug: bool=False) -> bool:
             return False
     if bool(stored.get('debug_mode')) != bool(expected.get('debug_mode')):
         return False
-    return not _AVATAR_CACHE_PATH.is_file()
+    return not _AVATAR_CACHE_PATH.is_file() and not _WARDROBE_CACHE_PATH.is_file()

@@ -124,7 +124,11 @@ class OSCHandler(QObject):
                 elif kind == 'osc':
                     if address is not None:
                         self._send_generic_osc(address, arguments or [])
-            except Exception:
+                from .osc_connection import OscConnectionTracker
+                OscConnectionTracker.instance().record_success()
+            except Exception as exc:
+                from .osc_connection import OscConnectionTracker
+                OscConnectionTracker.instance().record_failure(str(exc))
                 logger.warning('Send job failed tag=%s kind=%s', job.tag, kind, exc_info=is_debug_mode())
             finally:
                 if job.done_event is not None:

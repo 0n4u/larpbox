@@ -18,6 +18,7 @@ class AvatarResult:
     image_url: str
     performance: str | None = None
     author_id: str = ''
+    platforms: tuple[str, ...] = ()
 
 @dataclass(frozen=True)
 class UserBadge:
@@ -57,6 +58,8 @@ class InstancePlayer:
     is_friend: bool = False
     trust: TrustRank | None = None
     avatar_id: str | None = None
+    status: UserStatusInfo | None = None
+    avatar_performance: str | None = None
 
 @dataclass(frozen=True)
 class InstanceInfo:
@@ -69,6 +72,9 @@ class InstanceInfo:
     can_close_instance: bool = False
     region: str = ''
     instance_type: str = ''
+    location: str = ''
+    owner_display_name: str = ''
+    max_players: int | None = None
 
 @dataclass(frozen=True)
 class CurrentUserProfile:
