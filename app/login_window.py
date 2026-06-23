@@ -1,7 +1,7 @@
 from __future__ import annotations
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import QCheckBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSizePolicy, QVBoxLayout, QWidget
-from .config import get_bool, load_config
+from .config import load_auth_session
 from .frameless_chrome import apply_frameless_chrome
 from .theme import dark_theme
 from .title_bar import TitleBar
@@ -148,11 +148,11 @@ class LoginWindow(QWidget):
         self.setStyleSheet(dark_theme('\n            QLabel#headerTitle {\n                color: #f0f0f0;\n                font-size: 13pt;\n                font-weight: 600;\n            }\n            QLabel#fieldLabel {\n                color: #8a8a8a;\n                font-size: 8pt;\n                font-weight: 600;\n                letter-spacing: 0.5px;\n            }\n            QLabel#mutedHint {\n                color: #7a8a7a;\n                font-size: 9pt;\n                margin-top: 2px;\n            }\n            QLabel#statusLabel {\n                font-size: 9pt;\n            }\n            QLineEdit {\n                padding: 4px 8px;\n            }\n            #loginFooter {\n                border-top: 1px solid #333333;\n            }\n            QPushButton#primaryButton {\n                background-color: #3d6fa8;\n                border: 1px solid #4ea3ff;\n                border-radius: 5px;\n                color: #ffffff;\n                font-weight: 600;\n                padding: 0 12px;\n            }\n            QPushButton#primaryButton:hover {\n                background-color: #4a7fbd;\n                border-color: #6bb5ff;\n            }\n            QPushButton#primaryButton:pressed {\n                background-color: #345f92;\n            }\n            QPushButton#primaryButton:disabled {\n                background-color: #2a3544;\n                border-color: #3a4555;\n                color: #888888;\n            }\n            QCheckBox {\n                spacing: 6px;\n                color: #b0b0b0;\n                font-size: 9pt;\n            }\n            QCheckBox::indicator {\n                width: 15px;\n                height: 15px;\n                border-radius: 3px;\n                border: 1px solid #3a3a3a;\n                background-color: #232323;\n            }\n            QCheckBox::indicator:checked {\n                background-color: #4ea3ff;\n                border: 1px solid #6bb5ff;\n            }\n        '))
 
     def _load_saved_username(self) -> None:
-        config = load_config()
-        username = str(config.get('auth_username') or '').strip()
+        auth = load_auth_session()
+        username = str(auth.get('auth_username') or '').strip()
         if username:
             self.username_input.setText(username)
-        self.remember_check.setChecked(get_bool(config.get('remember_login')))
+        self.remember_check.setChecked(bool(auth.get('remember_login')))
 
     def prepare_for_display(self, parent: QWidget | None=None, *, relogin: bool=False, reason: str='') -> None:
         self.session = None
@@ -221,11 +221,23 @@ class LoginWindow(QWidget):
         tfa_code = self.two_factor_input.text().strip() or None
         self._set_busy(True)
         self._set_status('Connecting to VRChat...')
-        self._worker = LoginWorker(username, password, two_factor_code=tfa_code, two_factor_method=self._two_factor_method)
-        self._worker.finished_ok.connect(self._on_login_ok)
-        self._worker.finished_error.connect(self._on_login_error)
-        self._worker.needs_two_factor.connect(self._on_two_factor_required)
-        self._worker.start()
+        self._disconnect_worker()
+        worker = LoginWorker(username, password, two_factor_code=tfa_code, two_factor_method=self._two_factor_method)
+        self._worker = worker
+        worker.finished_ok.connect(self._on_login_ok)
+        worker.finished_error.connect(self._on_login_error)
+        worker.needs_two_factor.connect(self._on_two_factor_required)
+        worker.start()
+
+    def _disconnect_worker(self) -> None:
+        worker = self._worker
+        if worker is None:
+            return
+        for signal, slot in ((worker.finished_ok, self._on_login_ok), (worker.finished_error, self._on_login_error), (worker.needs_two_factor, self._on_two_factor_required)):
+            try:
+                signal.disconnect(slot)
+            except (TypeError, RuntimeError):
+                pass
 
     def _on_two_factor_required(self, method: str) -> None:
         self._set_busy(False)

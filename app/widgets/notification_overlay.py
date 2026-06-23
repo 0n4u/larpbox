@@ -3,7 +3,7 @@ import time
 from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, QTimer, Qt, QPoint, pyqtSignal
 from PyQt6.QtGui import QMouseEvent
 from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QProgressBar, QVBoxLayout, QWidget
-from ..config import get_bool, load_config
+from ..config import get_bool, load_config_cached
 from ..logging_setup import debug_event, get_logger, truncate_for_log
 from ..safe_runtime import safe_call
 from ..services.notifications import NotificationBus
@@ -108,6 +108,7 @@ class _Toast(QFrame):
         return True
 
 class NotificationOverlay(QWidget):
+    friend_filter_requested = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -125,7 +126,7 @@ class NotificationOverlay(QWidget):
         self._track_timer.start()
 
     def _notifications_enabled(self) -> bool:
-        return get_bool(load_config().get('enable_notifications', True))
+        return get_bool(load_config_cached().get('enable_notifications', True))
 
     def _vrchat_available(self) -> bool:
         return find_vrchat_window() is not None
@@ -233,20 +234,10 @@ class NotificationOverlay(QWidget):
         self._sync_frame()
 
     def _on_toast_action(self, action: str) -> None:
-        from PyQt6.QtWidgets import QApplication
-        app = QApplication.instance()
-        if app is None:
-            return
-        for widget in app.topLevelWidgets():
-            if widget.__class__.__name__ == 'PresetConfigUI':
-                widget.showNormal()
-                widget.raise_()
-                widget.activateWindow()
-                if action == 'show_friends_joinable' and hasattr(widget, 'friends_list'):
-                    widget.friends_list._set_filter('join_me')
-                elif action == 'show_friends' and hasattr(widget, 'friends_list'):
-                    widget.friends_list._set_filter('online')
-                return
+        if action == 'show_friends_joinable':
+            self.friend_filter_requested.emit('join_me')
+        elif action == 'show_friends':
+            self.friend_filter_requested.emit('online')
 
     def _dismiss_toast(self, toast: _Toast, *, immediate: bool=False) -> None:
         if toast not in self._toasts:

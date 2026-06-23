@@ -230,7 +230,7 @@ class SettingsWindow(QWidget):
         self.avatar_provider_combo = QComboBox()
         for provider in provider_list():
             self.avatar_provider_combo.addItem(provider.label, provider.id)
-        self.avatar_provider_combo.setToolTip('VRCX-style search APIs. Retries alternate HTTPS ports when the default fails.')
+        self.avatar_provider_combo.setToolTip('Community avatar search APIs. Retries alternate HTTPS ports when the default fails.')
         api_row.addWidget(self.avatar_provider_combo, 1)
         scroll_layout.addLayout(api_row)
         api_test_row = QHBoxLayout()

@@ -5,7 +5,7 @@ import threading
 from typing import Any
 import psutil
 from PyQt6.QtCore import QThread, pyqtSignal
-from .config import load_config
+from .config import load_config_cached
 from .media_smtc import fetch_smtc_media, format_track_display, smtc_available
 from .logging_setup import get_logger, truncate_for_log
 logger = get_logger('media')
@@ -163,7 +163,7 @@ class MediaIntegration(QThread):
             track = self.get_media_info_windows()
         if track is None:
             return None
-        allowed = load_config().get('media_allowed_apps') or []
+        allowed = load_config_cached().get('media_allowed_apps') or []
         if isinstance(allowed, list) and allowed:
             source = str(track.get('source', '')).casefold()
             allowed_lower = {str(a).casefold().replace('.exe', '') for a in allowed}

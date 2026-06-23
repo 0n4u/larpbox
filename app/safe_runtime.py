@@ -3,7 +3,6 @@ import functools
 import logging
 import sys
 import threading
-import traceback
 from collections.abc import Callable
 from typing import Any, TypeVar
 from PyQt6.QtCore import QtMsgType, qInstallMessageHandler

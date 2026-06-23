@@ -7,7 +7,7 @@ from PyQt6.QtCore import QObject, QSettings, pyqtSignal
 from pythonosc import udp_client
 from .config import load_config, message_interval_ms, parse_idle_char, VRCHAT_CHATBOX_MIN_INTERVAL_MS
 from .logging_setup import get_logger, is_debug_mode, truncate_for_log
-from .osc_client import OscChatClient
+from .osc_client import ChatboxMessageFormatter, OscChatClient
 from app.preset_storage import load_presets, resolve_preset_name
 logger = get_logger('osc')
 
@@ -219,9 +219,13 @@ class OSCHandler(QObject):
 
     def combine_with_media(self, frame: str) -> str:
         frame = '' if frame is None else str(frame)
-        if self.media_enabled and self.media_text:
-            return f'{self.media_text}\n{frame}'
-        return frame
+        if not (self.media_enabled and self.media_text):
+            return frame
+        media_budget = ChatboxMessageFormatter.MAX_LENGTH - len(frame) - 1
+        if media_budget <= 0:
+            return frame
+        media = self.media_text[:media_budget]
+        return f'{media}\n{frame}'
 
     def update_media_text(self, display_text: str) -> bool:
         display_text = '' if display_text is None else str(display_text).strip()

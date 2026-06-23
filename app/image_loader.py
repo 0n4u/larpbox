@@ -3,7 +3,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Iterable
 from PyQt6.QtCore import Qt, QRunnable, QThreadPool, QTimer, QUrl, pyqtSignal, QObject
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PyQt6.QtWidgets import QLabel, QWidget
 from .image_cache import cached_image_path, save_image_bytes_to_cache
@@ -33,11 +33,11 @@ class _DiskLoadRunnable(QRunnable):
 
     def run(self) -> None:
         try:
-            pixmap = QPixmap(self.path)
-            _disk_signals.finished.emit(self.cache_key, pixmap, self.labels)
+            image = QImage(self.path)
+            _disk_signals.finished.emit(self.cache_key, image, self.labels)
         except Exception as exc:
             log_exception(logger, 'disk image load', exc)
-            _disk_signals.finished.emit(self.cache_key, QPixmap(), self.labels)
+            _disk_signals.finished.emit(self.cache_key, QImage(), self.labels)
 
 class RemoteImageLabel(QLabel):
     _MAX_CONCURRENT = 32
@@ -128,13 +128,13 @@ class RemoteImageLabel(QLabel):
         cls._disk_hook_installed = True
 
     @classmethod
-    def _on_disk_loaded(cls, cache_key: str, pixmap_obj: object, labels_obj: object) -> None:
+    def _on_disk_loaded(cls, cache_key: str, image_obj: object, labels_obj: object) -> None:
         try:
             labels = [label for label in (labels_obj if isinstance(labels_obj, list) else []) if isinstance(label, RemoteImageLabel)]
             url = labels[0]._url if labels else ''
             if url:
                 cls._pending.pop(url, None)
-            pixmap = pixmap_obj if isinstance(pixmap_obj, QPixmap) else QPixmap()
+            pixmap = QPixmap.fromImage(image_obj) if isinstance(image_obj, QImage) and (not image_obj.isNull()) else QPixmap()
             if pixmap.isNull():
                 debug_event(logger, 'disk cache miss', key=cache_key)
                 for label in labels:

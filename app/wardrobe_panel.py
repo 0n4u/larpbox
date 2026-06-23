@@ -8,6 +8,7 @@ from .avatar_search_providers import PERFORMANCE_COLORS
 from .image_loader import RemoteImageLabel
 from .logging_setup import get_logger
 from .api_startup import in_startup_window
+from .services.action_runner import ActionRunner
 from .services.session_manager import SessionManager
 from .theme import TOOLBAR_BUTTON, dark_theme, themed_menu
 from .ui_animations import animate_list_items, flash_widget, pop_in_widget, pulse_widget, stop_pulse
@@ -182,7 +183,7 @@ class WardrobePanel(QWidget):
         self.session = session
         self._list_worker: WardrobeListWorker | None = None
         self._enrich_worker: WardrobeEnrichWorker | None = None
-        self._action_worker: ApiActionWorker | None = None
+        self._action_runner = ActionRunner(self)
         self._all_avatars: list[AvatarResult] = []
         self._filtered_avatars: list[AvatarResult] = []
         self._cards_by_id: dict[str, WardrobeCard] = {}
@@ -368,8 +369,9 @@ class WardrobePanel(QWidget):
             self.status_label.setText(f'{total} favorites')
         self._populate_next_batch()
 
-    def _populate_next_batch(self) -> None:
-        generation = self._populate_generation
+    def _populate_next_batch(self, generation: int | None=None) -> None:
+        if generation is None:
+            generation = self._populate_generation
         if generation != self._populate_generation:
             return
         if self._populate_index >= len(self._filtered_avatars):
@@ -391,7 +393,7 @@ class WardrobePanel(QWidget):
         self._populate_index = end
         self._queue_enrich(enrich_ids)
         if self._populate_index < len(self._filtered_avatars):
-            QTimer.singleShot(_POPULATE_INTERVAL_MS, self._populate_next_batch)
+            QTimer.singleShot(_POPULATE_INTERVAL_MS, lambda: self._populate_next_batch(generation))
 
     def _on_scroll(self, _value: int) -> None:
         bar = self.scroll.verticalScrollBar()
@@ -492,14 +494,12 @@ class WardrobePanel(QWidget):
             self.status_label.setText(f'{total} favorites · {cached} with details')
 
     def _wear(self, avatar_id: str) -> None:
-        if self.session is None or (self._action_worker and self._action_worker.isRunning()):
+        if self.session is None or self._action_runner.is_running():
             return
         self.status_label.setText('Switching avatar…')
         pulse_widget(self.status_label)
-        self._action_worker = ApiActionWorker(lambda: select_avatar(self.session, avatar_id), 'Avatar selected — switch applies in VRChat.')
-        self._action_worker.finished_ok.connect(self._on_wear_ok)
-        self._action_worker.finished_error.connect(self._on_wear_error)
-        self._action_worker.start()
+        worker = ApiActionWorker(lambda: select_avatar(self.session, avatar_id), 'Avatar selected — switch applies in VRChat.')
+        self._action_runner.run(worker, on_ok=self._on_wear_ok, on_error=self._on_wear_error)
 
     def _on_wear_ok(self, _message: str) -> None:
         stop_pulse(self.status_label)
@@ -513,5 +513,4 @@ class WardrobePanel(QWidget):
         stop_pulse(self.status_label)
         self._stop_workers()
         flush_cache()
-        if self._action_worker and self._action_worker.isRunning():
-            self._action_worker.wait(2000)
+        self._action_runner.cleanup()

@@ -10,6 +10,7 @@ from .status_indicator import StatusIndicator
 from .user_status import status_dot_style
 from .logging_setup import get_logger
 from .player_list_bar import PLAYER_LIST_HEIGHT
+from .services.action_runner import ActionRunner
 from .services.auth_errors import is_rate_limit_error
 from .services.session_manager import SessionManager
 from .theme import TOOLBAR_BUTTON, dark_theme, themed_menu
@@ -221,7 +222,7 @@ class FriendsListPanel(QWidget):
         super().__init__(parent)
         self.session = session
         self._worker: FriendsWorker | None = None
-        self._action_worker: ApiActionWorker | None = None
+        self._action_runner = ActionRunner(self)
         self._populate_generation = 0
         self._populate_gen = 0
         self._pending_friends: list[FriendEntry] = []
@@ -394,15 +395,7 @@ class FriendsListPanel(QWidget):
         return ' · '.join(parts[:4])
 
     def _start_action_worker(self, worker: ApiActionWorker) -> None:
-        if self._action_worker is not None:
-            if self._action_worker.isRunning():
-                self._action_worker.request_cancel()
-            self._disconnect_action_worker()
-        self._action_worker = worker
-        worker.finished_ok.connect(self._on_action_ok)
-        worker.finished_error.connect(self._on_action_error)
-        worker.finished_cancelled.connect(self._on_action_cancelled)
-        worker.start()
+        self._action_runner.run(worker, on_ok=self._on_action_ok, on_error=self._on_action_error, on_cancelled=self._on_action_cancelled)
 
     def _on_card_action(self, action: str, user_id: str, detail: str) -> None:
         if action == 'copy_id':
@@ -424,7 +417,7 @@ class FriendsListPanel(QWidget):
             return
         if self.session is None:
             return
-        if self._action_worker and self._action_worker.isRunning():
+        if self._action_runner.is_running():
             return
         if action == 'force_clone':
             friend = next((entry for entry in self._all_friends if entry.user_id == user_id), None)
@@ -456,7 +449,7 @@ class FriendsListPanel(QWidget):
             if detail:
                 self._add_friend_to_group(user_id, detail)
             return
-        mod_map = {'block': ('block', False), 'unblock': ('block', True), 'mute': ('mute', False), 'unmute': ('mute', True)}
+        mod_map = {'block': ('block', False), 'unblock': ('block', True), 'hide_avatar': ('hideAvatar', False), 'unhide_avatar': ('hideAvatar', True), 'mute': ('mute', False), 'unmute': ('mute', True)}
         if action in mod_map:
             mod_type, undo = mod_map[action]
             fn = unmoderate_player if undo else moderate_player
@@ -464,20 +457,6 @@ class FriendsListPanel(QWidget):
             return
         if action == 'unfriend':
             self._start_action_worker(ApiActionWorker(lambda: unfriend_user(self.session, user_id)))
-
-    def _disconnect_action_worker(self) -> None:
-        worker = self._action_worker
-        if worker is None:
-            return
-        for signal, slot in (
-            (worker.finished_ok, self._on_action_ok),
-            (worker.finished_error, self._on_action_error),
-            (worker.finished_cancelled, self._on_action_cancelled),
-        ):
-            try:
-                signal.disconnect(slot)
-            except (TypeError, RuntimeError):
-                pass
 
     def _on_action_ok(self, message: str) -> None:
         if not widget_is_valid(self):
@@ -537,6 +516,9 @@ class FriendsListPanel(QWidget):
             ids = set(groups.get(group_name, []) if isinstance(groups, dict) else [])
             return [friend for friend in friends if friend.user_id in ids]
         return friends
+
+    def apply_filter(self, filter_id: str) -> None:
+        self._set_filter(filter_id)
 
     def _set_filter(self, filter_id: str) -> None:
         self._filter_id = filter_id
@@ -704,11 +686,9 @@ class FriendsListPanel(QWidget):
             self._pending_friends = []
 
     def cleanup(self) -> None:
-        self._disconnect_action_worker()
+        self._action_runner.cleanup()
         self._stop_populate()
         self._poll_timer.stop()
         self._full_poll_timer.stop()
         if self._worker and self._worker.isRunning():
             self._worker.wait(2000)
-        if self._action_worker and self._action_worker.isRunning():
-            self._action_worker.wait(2000)

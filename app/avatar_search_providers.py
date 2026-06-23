@@ -5,7 +5,7 @@ from typing import Callable
 from .avatar_search_connectivity import ProviderProbeResult, probe_provider, probe_provider_search
 from .config import load_config
 from .logging_setup import get_logger, is_debug_mode
-from .vrchat_api import AvatarResult, lookup_avatars_by_author, search_avatars_avtrdb, search_avatars_official, search_avatars_requi, search_avatars_vrcx_endpoint
+from .vrchat_api import AvatarResult, lookup_avatars_by_author, search_avatars_avtrdb, search_avatars_official, search_avatars_requi, search_avatars_endpoint
 from .vrchat_auth import VRChatSession
 logger = get_logger('avatar_search_providers')
 _AVTR_RE = re.compile('^avtr_[a-f0-9-]{36}$', re.IGNORECASE)
@@ -75,12 +75,12 @@ def _search_avtrdb(query: str, filter_id: str, *, limit: int=40, offset: int=0) 
 
 def _search_jhp(query: str, filter_id: str, *, limit: int=40, offset: int=0) -> list[AvatarResult]:
     _ = filter_id
-    results = search_avatars_vrcx_endpoint(JHP_SEARCH_BASE, query, limit=limit + offset)
+    results = search_avatars_endpoint(JHP_SEARCH_BASE, query, limit=limit + offset)
     return results[offset:offset + limit]
 
 def _search_avatar_recovery(query: str, filter_id: str, *, limit: int=40, offset: int=0) -> list[AvatarResult]:
     _ = filter_id
-    results = search_avatars_vrcx_endpoint(AVATAR_RECOVERY_SEARCH_BASE, query, limit=limit + offset)
+    results = search_avatars_endpoint(AVATAR_RECOVERY_SEARCH_BASE, query, limit=limit + offset)
     return results[offset:offset + limit]
 
 def _search_requi(query: str, filter_id: str, *, limit: int=40, offset: int=0) -> list[AvatarResult]:
@@ -185,9 +185,9 @@ def _search_combined(session: VRChatSession | None, query: str, filter_id: str, 
     return AvatarSearchOutcome(results=page, notice=notice, has_more=has_more)
 _AVTRDB_FILTERS = (AvatarSearchFilter('all', 'All results'), AvatarSearchFilter('perf_Excellent', 'PC: Excellent'), AvatarSearchFilter('perf_Good', 'PC: Good'), AvatarSearchFilter('perf_Medium', 'PC: Medium'), AvatarSearchFilter('perf_Poor', 'PC: Poor'), AvatarSearchFilter('perf_VeryPoor', 'PC: Very Poor'), AvatarSearchFilter('platform_pc', 'Platform: PC'), AvatarSearchFilter('platform_android', 'Platform: Android'), AvatarSearchFilter('platform_ios', 'Platform: iOS'), AvatarSearchFilter('sort_name', 'Sort by name'), AvatarSearchFilter('sort_updated', 'Sort by PC rating'))
 _COMBINED_FILTERS = _AVTRDB_FILTERS + (AvatarSearchFilter('featured', 'VRChat: Featured'), AvatarSearchFilter('mine_all', 'VRChat: My avatars'))
-_VRCX_MIRROR_FILTERS = (AvatarSearchFilter('all', 'All results'),)
+_MIRROR_FILTERS = (AvatarSearchFilter('all', 'All results'),)
 _VRCHAT_FILTERS = (AvatarSearchFilter('featured', 'Featured avatars'), AvatarSearchFilter('featured_recent', 'Featured (newest)'), AvatarSearchFilter('mine_all', 'My avatars (all)'), AvatarSearchFilter('mine_public', 'My avatars (public)'), AvatarSearchFilter('mine_private', 'My avatars (private)'))
-PROVIDERS: dict[str, AvatarSearchProvider] = {'combined': AvatarSearchProvider(id='combined', label='All APIs', description='Search all databases together — filters apply per supported API', requires_login=False, requires_query=True, min_query_len=2, filters=_COMBINED_FILTERS), 'avtrdb': AvatarSearchProvider(id='avtrdb', label='avtrDB', description='Global public avatar search (avtrdb.com)', requires_login=False, requires_query=True, min_query_len=3, filters=_AVTRDB_FILTERS), 'just_h': AvatarSearchProvider(id='just_h', label='Just-H Party', description='Community database — auto-falls back if unavailable', requires_login=False, requires_query=True, min_query_len=3, filters=_VRCX_MIRROR_FILTERS), 'avatar_recovery': AvatarSearchProvider(id='avatar_recovery', label='AvatarRecovery', description='Large independent index (avatarrecovery.com)', requires_login=False, requires_query=True, min_query_len=3, filters=_VRCX_MIRROR_FILTERS), 'requi': AvatarSearchProvider(id='requi', label='Requi.dev', description='Community VRCX search API (requi.dev)', requires_login=False, requires_query=True, min_query_len=3, filters=_VRCX_MIRROR_FILTERS), 'vrchat': AvatarSearchProvider(id='vrchat', label='VRChat Official', description='Featured and your own avatars via VRChat API', requires_login=True, requires_query=False, min_query_len=0, filters=_VRCHAT_FILTERS)}
+PROVIDERS: dict[str, AvatarSearchProvider] = {'combined': AvatarSearchProvider(id='combined', label='All APIs', description='Search all databases together — filters apply per supported API', requires_login=False, requires_query=True, min_query_len=2, filters=_COMBINED_FILTERS), 'avtrdb': AvatarSearchProvider(id='avtrdb', label='avtrDB', description='Global public avatar search (avtrdb.com)', requires_login=False, requires_query=True, min_query_len=3, filters=_AVTRDB_FILTERS), 'just_h': AvatarSearchProvider(id='just_h', label='Just-H Party', description='Community database — auto-falls back if unavailable', requires_login=False, requires_query=True, min_query_len=3, filters=_MIRROR_FILTERS), 'avatar_recovery': AvatarSearchProvider(id='avatar_recovery', label='AvatarRecovery', description='Large independent index (avatarrecovery.com)', requires_login=False, requires_query=True, min_query_len=3, filters=_MIRROR_FILTERS), 'requi': AvatarSearchProvider(id='requi', label='Requi.dev', description='Community avatar search API (requi.dev)', requires_login=False, requires_query=True, min_query_len=3, filters=_MIRROR_FILTERS), 'vrchat': AvatarSearchProvider(id='vrchat', label='VRChat Official', description='Featured and your own avatars via VRChat API', requires_login=True, requires_query=False, min_query_len=0, filters=_VRCHAT_FILTERS)}
 _PROVIDER_SEARCH: dict[str, Callable[..., list[AvatarResult]]] = {'avtrdb': lambda session, query, filter_id, limit=40, offset=0: _search_avtrdb(query, filter_id, limit=limit, offset=offset), 'just_h': lambda session, query, filter_id, limit=40, offset=0: _search_jhp(query, filter_id, limit=limit, offset=offset), 'avatar_recovery': lambda session, query, filter_id, limit=40, offset=0: _search_avatar_recovery(query, filter_id, limit=limit, offset=offset), 'requi': lambda session, query, filter_id, limit=40, offset=0: _search_requi(query, filter_id, limit=limit, offset=offset), 'vrchat': lambda session, query, filter_id, limit=40, offset=0: _search_vrchat(session, query, filter_id, limit=limit, offset=offset)}
 
 def provider_list() -> list[AvatarSearchProvider]:

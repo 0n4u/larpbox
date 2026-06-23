@@ -1,10 +1,22 @@
 from __future__ import annotations
 import asyncio
 import sys
+import threading
 from typing import Any
 _PLAYING = 4
 _PAUSED = 5
 from .services.media_format import format_media_display
+
+_loop_storage = threading.local()
+
+
+def _get_event_loop() -> asyncio.AbstractEventLoop:
+    loop = getattr(_loop_storage, 'loop', None)
+    if loop is None or loop.is_closed():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        _loop_storage.loop = loop
+    return loop
 
 def smtc_available() -> bool:
     if sys.platform != 'win32':
@@ -65,6 +77,6 @@ def fetch_smtc_media() -> dict[str, Any] | None:
     if not smtc_available():
         return None
     try:
-        return asyncio.run(_fetch_async())
+        return _get_event_loop().run_until_complete(_fetch_async())
     except Exception:
         return None

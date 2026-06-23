@@ -17,7 +17,9 @@ _UNPACK_RE = re.compile('\\[AssetBundleDownloadManager\\].*Unpacking Avatar \\((
 _FOLLOW_WINDOW = 200
 _AVTR_WINDOW = 250
 _TAIL_READ_BYTES = 512 * 1024
+_MAX_TAIL_READ_BYTES = 16 * 1024 * 1024
 _log_lines_cache: tuple[str, float, list[str]] | None = None
+_user_avatar_map_cache: tuple[tuple, dict[str, str]] | None = None
 
 @dataclass(frozen=True)
 class LogPlayer:
@@ -50,8 +52,19 @@ def find_vrchat_log_files() -> list[Path]:
     return sorted(unique.values(), key=lambda path: path.stat().st_mtime, reverse=True)
 
 def invalidate_log_cache() -> None:
-    global _log_lines_cache
+    global _log_lines_cache, _user_avatar_map_cache
     _log_lines_cache = None
+    _user_avatar_map_cache = None
+
+def _log_files_signature(paths: list[Path]) -> tuple:
+    signature: list[tuple[str, float, int]] = []
+    for path in paths:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        signature.append((str(path), stat.st_mtime, stat.st_size))
+    return tuple(signature)
 
 def _read_log_text(path: Path, *, tail_only: bool=False) -> str | None:
     try:
@@ -60,9 +73,14 @@ def _read_log_text(path: Path, *, tail_only: bool=False) -> str | None:
         with path.open('rb') as handle:
             handle.seek(0, os.SEEK_END)
             size = handle.tell()
-            handle.seek(max(0, size - _TAIL_READ_BYTES))
-            data = handle.read()
-        return data.decode('utf-8', errors='replace')
+            read_bytes = _TAIL_READ_BYTES
+            while True:
+                start = max(0, size - read_bytes)
+                handle.seek(start)
+                text = handle.read().decode('utf-8', errors='replace')
+                if start == 0 or read_bytes >= _MAX_TAIL_READ_BYTES or _ROOM_START_RE.search(text):
+                    return text
+                read_bytes *= 2
     except OSError:
         logger.debug('Could not read VRChat log at %s', path, exc_info=True)
         return None
@@ -317,8 +335,13 @@ def _room_lines_from_file_lines(lines: list[str]) -> list[str]:
     return lines[_last_room_start_index(lines):]
 
 def build_user_avatar_map_from_logs() -> dict[str, str]:
+    global _user_avatar_map_cache
+    files = find_vrchat_log_files()
+    signature = _log_files_signature(files)
+    if _user_avatar_map_cache is not None and _user_avatar_map_cache[0] == signature:
+        return dict(_user_avatar_map_cache[1])
     merged: dict[str, str] = {}
-    for path in reversed(find_vrchat_log_files()):
+    for path in reversed(files):
         lines = _read_log_lines_cached(path)
         if not lines:
             try:
@@ -326,7 +349,8 @@ def build_user_avatar_map_from_logs() -> dict[str, str]:
             except OSError:
                 continue
         merged.update(_build_user_avatar_map_from_lines(_room_lines_from_file_lines(lines)))
-    return merged
+    _user_avatar_map_cache = (signature, merged)
+    return dict(merged)
 
 def lookup_player_avatar_info(user_id: str, display_name: str | None=None) -> PlayerAvatarInfo:
     try:

@@ -152,7 +152,7 @@ class AccountSettingsWindow(QWidget):
         config = load_config()
         if self.session:
             self.display_label.setText(self.session.display_name or 'Signed in')
-            raw = str(config.get('auth_username') or self.session.user_id or '')
+            raw = str(self.session.username or self.session.user_id or '')
             self.user_label.setText(_mask_identifier(raw))
             self.user_label.setToolTip('')
         else:

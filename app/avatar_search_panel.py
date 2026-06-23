@@ -8,6 +8,7 @@ from .avatar_search_providers import PERFORMANCE_COLORS, default_filter_for, fil
 from .config import save_config
 from .image_loader import RemoteImageLabel
 from .logging_setup import get_logger, is_debug_mode
+from .services.action_runner import ActionRunner
 from .services.session_manager import SessionManager
 from .theme import dark_theme, themed_menu
 from .ui_animations import flash_widget, pop_in_widget, pulse_widget, stagger_pop_in, stop_pulse, stop_widget_animations
@@ -151,7 +152,10 @@ class AvatarSearchPanel(QWidget):
         self._filter_id = default_filter_for(self._provider)
         self._worker: AvatarSearchWorker | None = None
         self._desc_workers: list[DescriptionWorker] = []
-        self._action_worker: ApiActionWorker | None = None
+        self._desc_queue: list[tuple[str, int]] = []
+        self._desc_active = 0
+        self._max_desc_workers = 6
+        self._action_runner = ActionRunner(self)
         self._search_generation = 0
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
@@ -253,9 +257,7 @@ class AvatarSearchPanel(QWidget):
         self._loading_more = False
         self._has_more = False
         stop_pulse(self.status_label)
-        for worker in list(self._desc_workers):
-            self._disconnect_desc_worker(worker)
-        self._desc_workers.clear()
+        self._reset_desc_workers()
         if self._worker is not None:
             worker = self._worker
             self._worker = None
@@ -272,6 +274,37 @@ class AvatarSearchPanel(QWidget):
             worker.finished_ok.disconnect()
         except Exception:
             pass
+
+    def _pump_desc_queue(self) -> None:
+        if self.session is None:
+            self._desc_queue.clear()
+            return
+        while self._desc_active < self._max_desc_workers and self._desc_queue:
+            avatar_id, generation = self._desc_queue.pop(0)
+            if generation != self._search_generation:
+                continue
+            worker = DescriptionWorker(self.session, avatar_id, generation)
+            worker.finished_ok.connect(self._on_description)
+            worker.finished.connect(lambda w=worker: self._on_desc_finished(w))
+            self._desc_workers.append(worker)
+            self._desc_active += 1
+            worker.start()
+
+    def _on_desc_finished(self, worker: DescriptionWorker) -> None:
+        self._desc_active = max(0, self._desc_active - 1)
+        try:
+            self._desc_workers.remove(worker)
+        except ValueError:
+            pass
+        worker.deleteLater()
+        self._pump_desc_queue()
+
+    def _reset_desc_workers(self) -> None:
+        self._desc_queue.clear()
+        self._desc_active = 0
+        for worker in list(self._desc_workers):
+            self._disconnect_desc_worker(worker)
+        self._desc_workers.clear()
 
     def _search_placeholder(self) -> str:
         return 'Search name, avtr_… or usr_…'
@@ -351,9 +384,7 @@ class AvatarSearchPanel(QWidget):
         self._worker.start()
 
     def _clear_results(self) -> None:
-        for worker in list(self._desc_workers):
-            self._disconnect_desc_worker(worker)
-        self._desc_workers.clear()
+        self._reset_desc_workers()
         stop_widget_animations(self.empty_label)
         while self.results_layout.count() > 1:
             item = self.results_layout.takeAt(0)
@@ -410,10 +441,8 @@ class AvatarSearchPanel(QWidget):
                 self.results_layout.insertWidget(self.results_layout.count() - 1, card)
                 cards.append(card)
                 if self.session and avatar.id and (not avatar.description):
-                    worker = DescriptionWorker(self.session, avatar.id, active_generation)
-                    worker.finished_ok.connect(self._on_description)
-                    worker.start()
-                    self._desc_workers.append(worker)
+                    self._desc_queue.append((avatar.id, active_generation))
+            self._pump_desc_queue()
             if cards:
                 stagger_pop_in(cards, duration=200, step_ms=16)
         except Exception as exc:
@@ -448,19 +477,17 @@ class AvatarSearchPanel(QWidget):
         if self.session is None:
             self.status_label.setText('Login required for this action.')
             return
-        if self._action_worker and self._action_worker.isRunning():
+        if self._action_runner.is_running():
             return
         if action == 'wear':
             self.status_label.setText('Switching avatar…')
-            self._action_worker = ApiActionWorker(lambda: select_avatar(self.session, value))
+            worker = ApiActionWorker(lambda: select_avatar(self.session, value))
         elif action == 'favorite':
             self.status_label.setText('Favoriting…')
-            self._action_worker = ApiActionWorker(lambda: favorite_avatar(self.session, value))
+            worker = ApiActionWorker(lambda: favorite_avatar(self.session, value))
         else:
             return
-        self._action_worker.finished_ok.connect(self._on_action_ok)
-        self._action_worker.finished_error.connect(self._on_action_error)
-        self._action_worker.start()
+        self._action_runner.run(worker, on_ok=self._on_action_ok, on_error=self._on_action_error)
 
     def _on_action_ok(self, message: str) -> None:
         self.status_label.setText(message)
@@ -473,8 +500,7 @@ class AvatarSearchPanel(QWidget):
 
     def cleanup(self) -> None:
         self._cancel_active_search(increment=False)
-        if self._action_worker and self._action_worker.isRunning():
-            self._action_worker.wait(2000)
+        self._action_runner.cleanup()
         if self._worker and self._worker.isRunning():
             self._worker.wait(2000)
         for worker in self._desc_workers:

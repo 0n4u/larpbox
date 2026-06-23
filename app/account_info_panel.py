@@ -2,7 +2,7 @@ from __future__ import annotations
 import webbrowser
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QFontMetrics
-from PyQt6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QTextEdit, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QTextEdit, QVBoxLayout, QWidget
 from .image_loader import RemoteImageLabel
 from .logging_setup import get_logger
 from .services.auth_errors import is_rate_limit_error

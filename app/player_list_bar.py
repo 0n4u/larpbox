@@ -9,6 +9,7 @@ from .api_action_worker import ApiActionWorker
 from .safe_runtime import widget_is_valid
 from .image_loader import RemoteImageLabel
 from .logging_setup import get_logger
+from .services.action_runner import ActionRunner
 from .services.session_manager import SessionManager
 from .status_indicator import StatusIndicator
 from .theme import dark_theme, themed_menu, TOOLBAR_BUTTON
@@ -16,7 +17,7 @@ from .ui_animations import animate_list_items, flash_widget, pulse_widget, revea
 from .avatar_search_providers import PERFORMANCE_COLORS
 from .widgets.player_detail_popover import PlayerDetailPopover
 from .vrchat_api import InstanceInfo, InstancePlayer, apply_cached_thumbnails, close_instance, enrich_instance_players, force_clone_player_avatar, get_current_instance, get_current_instance_log_only, invite_user_to_instance, moderate_player, thumbnail_url_for_size, unmoderate_player, unfriend_user, user_profile_url
-from .vrchat_log_players import invalidate_log_cache
+from .vrchat_log_players import invalidate_log_cache, log_players_for_current_room
 from .api_startup import in_startup_window, startup_delay_ms
 from .vrchat_auth import VRChatSession
 logger = get_logger('player_list')
@@ -270,7 +271,7 @@ class PlayerListBar(QWidget):
         self._worker: LogPlayersWorker | None = None
         self._api_worker: ApiInstanceWorker | None = None
         self._fallback_worker: LogPlayersWorker | None = None
-        self._action_worker: ApiActionWorker | None = None
+        self._action_runner = ActionRunner(self)
         self._current_instance: InstanceInfo | None = None
         self._refresh_generation = 0
         self._populate_generation = 0
@@ -482,26 +483,18 @@ class PlayerListBar(QWidget):
             return
         menu = themed_menu(self)
         close_action = menu.addAction('Force Close Instance')
-        close_action.setToolTip('Hard-close this instance (instance owner only, like VRCX)')
+        close_action.setToolTip('Hard-close this instance (instance owner only)')
         close_action.triggered.connect(self._force_close_instance)
         menu.exec(self.frame.mapToGlobal(pos))
 
     def _start_action_worker(self, worker: ApiActionWorker) -> None:
-        if self._action_worker is not None:
-            if self._action_worker.isRunning():
-                self._action_worker.request_cancel()
-            self._disconnect_action_worker()
-        self._action_worker = worker
-        worker.finished_ok.connect(self._on_action_ok)
-        worker.finished_error.connect(self._on_action_error)
-        worker.finished_cancelled.connect(self._on_action_cancelled)
-        worker.start()
+        self._action_runner.run(worker, on_ok=self._on_action_ok, on_error=self._on_action_error, on_cancelled=self._on_action_cancelled)
 
     def _force_close_instance(self) -> None:
         info = self._current_instance
         if info is None or self.session is None or (not info.can_close_instance):
             return
-        if self._action_worker and self._action_worker.isRunning():
+        if self._action_runner.is_running():
             return
         self._set_world_label('Closing instance…')
         self._start_action_worker(ApiActionWorker(lambda: close_instance(self.session, info.world_id, info.instance_id, hard_close=True), 'Instance force-closed.'))
@@ -535,7 +528,7 @@ class PlayerListBar(QWidget):
                 return
             if self.session is None:
                 return
-            if self._action_worker and self._action_worker.isRunning():
+            if self._action_runner.is_running():
                 return
             if action == 'force_clone':
                 avatar_id = None
@@ -571,20 +564,6 @@ class PlayerListBar(QWidget):
             self._start_action_worker(ApiActionWorker(lambda: fn(self.session, user_id, mod_type), f"{('Removed' if is_undo else 'Applied')} {mod_type}."))
         except Exception as e:
             logger.error('Player action failed for %s: %s', action, e, exc_info=True)
-
-    def _disconnect_action_worker(self) -> None:
-        worker = self._action_worker
-        if worker is None:
-            return
-        for signal, slot in (
-            (worker.finished_ok, self._on_action_ok),
-            (worker.finished_error, self._on_action_error),
-            (worker.finished_cancelled, self._on_action_cancelled),
-        ):
-            try:
-                signal.disconnect(slot)
-            except (TypeError, RuntimeError):
-                pass
 
     def _on_action_ok(self, message: str) -> None:
         if not widget_is_valid(self):
@@ -635,13 +614,23 @@ class PlayerListBar(QWidget):
     def _quick_log_check(self) -> None:
         if SessionManager.instance().is_relogin_active() or self.session is None:
             return
-        if self._action_worker and self._action_worker.isRunning():
+        if self._action_runner.is_running():
             return
         if self._worker and self._worker.isRunning():
             return
         if self._context_menu_open:
             return
-        return
+        try:
+            players, _location = log_players_for_current_room()
+        except Exception:
+            logger.debug('Quick log check failed', exc_info=True)
+            return
+        log_ids = {player.user_id for player in players}
+        current = self._current_instance
+        current_ids = {player.user_id for player in current.players} if current is not None else set()
+        if log_ids != current_ids and (log_ids or current_ids):
+            logger.debug('Quick log check detected roster change (%d -> %d) — refreshing', len(current_ids), len(log_ids))
+            self.refresh()
 
     def refresh(self) -> None:
         if SessionManager.instance().is_relogin_active():
@@ -698,7 +687,7 @@ class PlayerListBar(QWidget):
             self._apply_instance_info(info)
             self._finish_checking_state()
             stop_pulse(self.status_label)
-            if not self._action_worker or not self._action_worker.isRunning():
+            if not self._action_runner.is_running():
                 self._update_status_summary()
                 flash_widget(self.status_label)
             return
@@ -714,7 +703,7 @@ class PlayerListBar(QWidget):
             self._apply_instance_info(info)
             self._finish_checking_state()
             stop_pulse(self.status_label)
-            if not self._action_worker or not self._action_worker.isRunning():
+            if not self._action_runner.is_running():
                 self._update_status_summary()
                 flash_widget(self.status_label)
             return
@@ -737,7 +726,7 @@ class PlayerListBar(QWidget):
         if isinstance(fallback, InstanceInfo):
             self._apply_instance_info(fallback)
             self._finish_checking_state()
-            if not self._action_worker or not self._action_worker.isRunning():
+            if not self._action_runner.is_running():
                 self._update_status_summary()
             return
         self._show_world_hint()
@@ -860,7 +849,7 @@ class PlayerListBar(QWidget):
             return
         self._current_instance = replace(self._current_instance, players=players)
         self._update_row_players(players)
-        if not self._action_worker or not self._action_worker.isRunning():
+        if not self._action_runner.is_running():
             self._update_status_summary()
         if self._players_missing_thumbnails(players) > 0:
             self._schedule_thumbnail_enrich()
@@ -982,7 +971,7 @@ class PlayerListBar(QWidget):
         self._begin_thumbnail_enrich()
 
     def cleanup(self) -> None:
-        self._disconnect_action_worker()
+        self._action_runner.cleanup()
         self._stop_populate()
         self._stop_thumbnail_enrich()
         self._poll_timer.stop()
@@ -996,5 +985,3 @@ class PlayerListBar(QWidget):
             self._api_worker.wait(2000)
         if self._fallback_worker and self._fallback_worker.isRunning():
             self._fallback_worker.wait(2000)
-        if self._action_worker and self._action_worker.isRunning():
-            self._action_worker.wait(2000)

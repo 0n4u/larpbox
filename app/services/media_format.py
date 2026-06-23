@@ -1,13 +1,12 @@
 from __future__ import annotations
-import re
-from ..config import load_config
+from ..config import load_config_cached
 
 def format_media_display(title: str, artist: str, is_playing: bool, *, template: str | None=None) -> str:
     title = (title or '').strip()
     artist = (artist or '').strip()
     if not title and (not artist):
         return 'Media (Paused)' if not is_playing else ''
-    cfg = load_config()
+    cfg = load_config_cached()
     fmt = template or str(cfg.get('media_format', '{title} by {artist}'))
 
     class _SafeDict(dict):

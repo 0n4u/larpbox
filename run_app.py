@@ -1,6 +1,6 @@
 import sys
 from PyQt6.QtWidgets import QApplication
-from app.logging_setup import get_debug_mode_from_config, get_logger, hide_console, setup_logging, show_console
+from app.logging_setup import get_debug_mode_from_config, get_logger, hide_console, setup_logging, show_console, shutdown_logging
 from app.main_window import PresetConfigUI
 from app.safe_runtime import install_crash_guards, run_shutdown_step, safe_call
 from app.services.errors import ErrorBus
@@ -8,14 +8,13 @@ from app.services.session_manager import SessionManager, prompt_for_login
 from app.vrchat_auth import VRChatSession, restore_session
 from app.services.rich_presence import RichPresenceManager
 from app.hotkey_manager import HotkeyManager
-from app.osc_connection import OscConnectionTracker
 from app.widgets.notification_overlay import NotificationOverlay
 from app.widgets.system_tray import AppSystemTray
 logger = get_logger('startup')
 
 def _warm_config() -> None:
     import json
-    from app.config import AUTH_KEYS, CONFIG_PATH, DEFAULT_CONFIG, load_config, write_config
+    from app.config import CONFIG_PATH, DEFAULT_CONFIG, load_config, write_config
     if not CONFIG_PATH.exists():
         return
     try:
@@ -23,11 +22,14 @@ def _warm_config() -> None:
             stored = json.load(f)
         if not isinstance(stored, dict):
             return
-        allowed = set(DEFAULT_CONFIG.keys()) | set(AUTH_KEYS) | {'_credentials_warning'}
-        if set(stored.keys()) - allowed:
+        if set(stored.keys()) - set(DEFAULT_CONFIG.keys()):
             write_config(load_config())
     except Exception:
         logger.warning('Failed to prune stale config keys', exc_info=True)
+
+def _flush_wardrobe_cache() -> None:
+    from app.wardrobe_cache import flush_cache
+    flush_cache()
 
 def _prompt_for_login(app: QApplication) -> VRChatSession | None:
     _ = app
@@ -62,6 +64,7 @@ def main() -> int:
     if window is None:
         logger.error('Failed to create main window — exiting')
         return 1
+    overlay.friend_filter_requested.connect(window.show_friends_with_filter)
     SessionManager.instance().set_session(session)
     SessionManager.instance().set_main_window(window)
     tray = AppSystemTray(window, app)
@@ -81,6 +84,8 @@ def main() -> int:
         run_shutdown_step('overlay', overlay.cleanup)
         run_shutdown_step('rich presence', RichPresenceManager.instance().cleanup)
         run_shutdown_step('main window', window.cleanup)
+        run_shutdown_step('wardrobe cache', _flush_wardrobe_cache)
+        run_shutdown_step('logging', shutdown_logging)
     app.aboutToQuit.connect(shutdown)
 
     def on_error(text: str, level: str) -> None:

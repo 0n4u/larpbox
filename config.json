@@ -38,11 +38,5 @@
     "hotkey_preset_3": "",
     "hotkey_preset_4": "",
     "hotkey_preset_5": "",
-    "_credentials_warning": "WARNING: Your VRChat login credentials are stored below. Do not share or stream this file \u2014 anyone with these values can access your account.",
-    "remember_login": false,
-    "auth_token": "",
-    "two_factor_token": "",
-    "auth_username": "",
-    "auth_display_name": "",
-    "auth_user_id": ""
+    "remember_login": false
 }

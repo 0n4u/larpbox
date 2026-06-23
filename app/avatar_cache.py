@@ -1,14 +1,17 @@
 from __future__ import annotations
 import json
+import threading
 import time
-from pathlib import Path
 from typing import Any
+from .atomic_io import atomic_write_json
 from .config import PROJECT_ROOT
 from .logging_setup import get_logger
 logger = get_logger('avatar_cache')
 _CACHE_PATH = PROJECT_ROOT / 'data' / 'avatar_cache.json'
 _CACHE: dict[str, dict[str, Any]] | None = None
 _LOG_SOURCES = frozenset({'log_live', 'log', 'log_name'})
+_MAX_ENTRIES = 5000
+_lock = threading.RLock()
 
 def _load() -> dict[str, dict[str, Any]]:
     global _CACHE
@@ -25,11 +28,28 @@ def _load() -> dict[str, dict[str, Any]]:
         _CACHE = {}
     return _CACHE
 
+def _entry_timestamp(entry: Any) -> float:
+    if isinstance(entry, dict):
+        value = entry.get('updated_at')
+        if isinstance(value, (int, float)):
+            return float(value)
+    return 0.0
+
+def _evict_if_needed() -> None:
+    if _CACHE is None or len(_CACHE) <= _MAX_ENTRIES:
+        return
+    ordered = sorted(_CACHE.items(), key=lambda item: _entry_timestamp(item[1]))
+    for key, _ in ordered[:len(_CACHE) - _MAX_ENTRIES]:
+        _CACHE.pop(key, None)
+
 def _save() -> None:
     if _CACHE is None:
         return
-    _CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _CACHE_PATH.write_text(json.dumps(_CACHE, indent=2), encoding='utf-8')
+    _evict_if_needed()
+    try:
+        atomic_write_json(_CACHE_PATH, _CACHE)
+    except Exception:
+        logger.debug('Could not write avatar cache', exc_info=True)
 
 FORCE_CLONE_CACHE_MAX_AGE_SEC = 7 * 24 * 3600
 
@@ -68,60 +88,63 @@ def get_recent_avatar_id_for_copy(user_id: str, *, in_room: bool) -> str | None:
 def sync_live_log_avatars(mapping: dict[str, str]) -> int:
     if not mapping:
         return 0
-    cache = _load()
-    updated = 0
-    for user_id, avatar_id in mapping.items():
-        user_id = user_id.strip()
-        avatar_id = avatar_id.strip()
-        if not user_id or not avatar_id.startswith('avtr_'):
-            continue
-        existing = cache.get(user_id)
-        previous = str(existing.get('avatar_id') or '').strip() if isinstance(existing, dict) else ''
-        if previous == avatar_id:
-            continue
-        cache[user_id] = {'avatar_id': avatar_id, 'source': 'log_live', 'updated_at': time.time()}
-        updated += 1
-        if previous:
-            logger.debug('Log avatar changed for %s: %s -> %s', user_id, previous, avatar_id)
-    if updated:
-        _save()
-    return updated
+    with _lock:
+        cache = _load()
+        updated = 0
+        for user_id, avatar_id in mapping.items():
+            user_id = user_id.strip()
+            avatar_id = avatar_id.strip()
+            if not user_id or not avatar_id.startswith('avtr_'):
+                continue
+            existing = cache.get(user_id)
+            previous = str(existing.get('avatar_id') or '').strip() if isinstance(existing, dict) else ''
+            if previous == avatar_id:
+                continue
+            cache[user_id] = {'avatar_id': avatar_id, 'source': 'log_live', 'updated_at': time.time()}
+            updated += 1
+            if previous:
+                logger.debug('Log avatar changed for %s: %s -> %s', user_id, previous, avatar_id)
+        if updated:
+            _save()
+        return updated
 
 def set_cached_avatar_id(user_id: str, avatar_id: str, *, source: str) -> None:
     avatar_id = avatar_id.strip()
     user_id = user_id.strip()
     if not user_id or not avatar_id.startswith('avtr_'):
         return
-    cache = _load()
-    existing = cache.get(user_id)
-    previous_id = str(existing.get('avatar_id') or '').strip() if isinstance(existing, dict) else ''
-    previous_source = str(existing.get('source') or '') if isinstance(existing, dict) else ''
-    if previous_id == avatar_id:
-        return
-    if source not in _LOG_SOURCES and previous_id and (previous_id != avatar_id) and (previous_source in _LOG_SOURCES) and (source not in ('api', 'instance')):
-        return
-    cache[user_id] = {'avatar_id': avatar_id, 'source': source, 'updated_at': time.time()}
-    _save()
+    with _lock:
+        cache = _load()
+        existing = cache.get(user_id)
+        previous_id = str(existing.get('avatar_id') or '').strip() if isinstance(existing, dict) else ''
+        previous_source = str(existing.get('source') or '') if isinstance(existing, dict) else ''
+        if previous_id == avatar_id:
+            return
+        if source not in _LOG_SOURCES and previous_id and (previous_id != avatar_id) and (previous_source in _LOG_SOURCES) and (source not in ('api', 'instance')):
+            return
+        cache[user_id] = {'avatar_id': avatar_id, 'source': source, 'updated_at': time.time()}
+        _save()
 
 def merge_user_avatar_map(mapping: dict[str, str], *, source: str) -> None:
     if not mapping:
         return
-    cache = _load()
-    changed = False
-    for user_id, avatar_id in mapping.items():
-        if not user_id or not avatar_id.startswith('avtr_'):
-            continue
-        existing = cache.get(user_id, {})
-        previous_id = str(existing.get('avatar_id') or '').strip() if isinstance(existing, dict) else ''
-        previous_source = str(existing.get('source') or '') if isinstance(existing, dict) else ''
-        if previous_id == avatar_id:
-            continue
-        if previous_id and previous_source in _LOG_SOURCES:
-            continue
-        cache[user_id] = {'avatar_id': avatar_id, 'source': source, 'updated_at': time.time()}
-        changed = True
-    if changed:
-        _save()
+    with _lock:
+        cache = _load()
+        changed = False
+        for user_id, avatar_id in mapping.items():
+            if not user_id or not avatar_id.startswith('avtr_'):
+                continue
+            existing = cache.get(user_id, {})
+            previous_id = str(existing.get('avatar_id') or '').strip() if isinstance(existing, dict) else ''
+            previous_source = str(existing.get('source') or '') if isinstance(existing, dict) else ''
+            if previous_id == avatar_id:
+                continue
+            if previous_id and previous_source in _LOG_SOURCES:
+                continue
+            cache[user_id] = {'avatar_id': avatar_id, 'source': source, 'updated_at': time.time()}
+            changed = True
+        if changed:
+            _save()
 
 def refresh_from_logs() -> int:
     from .vrchat_amplitude import build_user_avatar_map_from_amplitude

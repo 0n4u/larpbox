@@ -1,22 +1,20 @@
 from __future__ import annotations
 import json
 import re
-import ssl
+import threading
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 import vrchatapi
-from vrchatapi.api import authentication_api, avatars_api, favorites_api, friends_api, instances_api, invite_api, notifications_api, playermoderation_api, users_api, worlds_api
+from vrchatapi.api import authentication_api, avatars_api, favorites_api, friends_api, instances_api, invite_api, notifications_api, users_api, worlds_api
 from vrchatapi.exceptions import ApiException, UnauthorizedException
 from vrchatapi.models.add_favorite_request import AddFavoriteRequest
 from vrchatapi.models.favorite_type import FavoriteType
 from vrchatapi.models.invite_request import InviteRequest
-from vrchatapi.models.moderate_user_request import ModerateUserRequest
 from ..action_cancel import check_cancelled
-from ..api_rate_limit import rate_limited_external_call, rate_limited_vrchat_call
+from ..api_rate_limit import rate_limited_vrchat_call
 from ..avatar_cache import FORCE_CLONE_CACHE_MAX_AGE_SEC, get_cached_avatar_id, get_recent_avatar_id_for_copy, set_cached_avatar_id, sync_live_log_avatars
 from ..logging_setup import get_logger
 from ..services.auth_errors import AuthSessionError, auth_session_error_from_api, api_error_text
@@ -25,15 +23,10 @@ from ..vrchat_auth import VRChatSession, _configure_api_client, USER_AGENT
 from ..vrchat_amplitude import build_user_avatar_map_from_amplitude
 from ..vrchat_log_players import LogPlayer, PlayerAvatarInfo, current_room_user_ids, invalidate_log_cache, log_players_for_current_room, lookup_player_avatar_info, lookup_player_avatar_info_historical, parse_avatar_ids_from_log
 from .models import AvatarResult, CurrentUserProfile, FriendEntry, InstanceInfo, InstancePlayer, TrustRank, UserBadge, trust_rank_from_tags
-VRCX_USER_AGENT = 'VRCX/2024.1.0'
 logger = get_logger('vrchat_api')
-AVTRDB_SEARCH_URL = 'https://api.avtrdb.com/v3/avatar/search/vrcx'
-REQUI_SEARCH_BASE = 'https://requi.dev/vrcx_search.php'
-AVATAR_RECOVERY_SEARCH_BASE = 'https://api.avatarrecovery.com/Avatar/vrcx'
-_VRCX_AVATAR_PROVIDER_URLS = (AVTRDB_SEARCH_URL, AVATAR_RECOVERY_SEARCH_BASE, REQUI_SEARCH_BASE)
-_AUTHOR_LOOKUP_PROVIDER_URLS = (AVATAR_RECOVERY_SEARCH_BASE, REQUI_SEARCH_BASE, AVTRDB_SEARCH_URL)
-_ALT_HTTPS_PORTS = (2053, 8443)
+from .avatar_providers import (PROVIDER_USER_AGENT, AVTRDB_SEARCH_URL, REQUI_SEARCH_BASE, AVATAR_RECOVERY_SEARCH_BASE, lookup_avatar_by_file_id, lookup_avatar_by_id_external, lookup_avatars_by_author, lookup_avatars_by_author_first_hit, lookup_avatar_id_by_image_file_id, search_avatars_avtrdb, search_avatars_endpoint, search_avatars_requi, search_avatars_combined)
 DEFAULT_AVATAR_FAVORITE_GROUP = 'avatars1'
+_CACHE_LOCK = threading.RLock()
 _INSTANCE_SUMMARY_CACHE: dict[str, tuple[float, str | None, int | None]] = {}
 _CURRENT_USER_CACHE: tuple[float, Any] | None = None
 _CURRENT_USER_CACHE_TTL_SEC = 12.0
@@ -41,11 +34,13 @@ _CURRENT_USER_CACHE_TTL_SEC = 12.0
 def _get_current_user(api_client: vrchatapi.ApiClient) -> Any:
     global _CURRENT_USER_CACHE
     now = time.monotonic()
-    if _CURRENT_USER_CACHE is not None and now - _CURRENT_USER_CACHE[0] < _CURRENT_USER_CACHE_TTL_SEC:
-        return _CURRENT_USER_CACHE[1]
+    with _CACHE_LOCK:
+        if _CURRENT_USER_CACHE is not None and now - _CURRENT_USER_CACHE[0] < _CURRENT_USER_CACHE_TTL_SEC:
+            return _CURRENT_USER_CACHE[1]
     auth = authentication_api.AuthenticationApi(api_client)
     me = auth.get_current_user()
-    _CURRENT_USER_CACHE = (now, me)
+    with _CACHE_LOCK:
+        _CURRENT_USER_CACHE = (now, me)
     return me
 _INSTANCE_SUMMARY_TTL_SEC = 120.0
 _USER_THUMB_CACHE: dict[str, str] = {}
@@ -65,16 +60,18 @@ _AVATAR_PERF_CACHE: dict[str, str] = {}
 ForceCloneMode = Literal['in_room', 'remote']
 
 def clear_session_caches() -> None:
-    _USER_THUMB_CACHE.clear()
-    _USER_TRUST_CACHE.clear()
-    _USER_STATUS_CACHE.clear()
-    _AVATAR_RESOLVE_CACHE.clear()
-    _AUTHOR_DISPLAY_ID_CACHE.clear()
-    _INSTANCE_SUMMARY_CACHE.clear()
-    _AVATAR_PERF_CACHE.clear()
     global _FRIEND_INSTANCE_PLAYERS, _CURRENT_USER_CACHE
-    _FRIEND_INSTANCE_PLAYERS = {}
-    _CURRENT_USER_CACHE = None
+    with _CACHE_LOCK:
+        _USER_THUMB_CACHE.clear()
+        _USER_TRUST_CACHE.clear()
+        _USER_STATUS_CACHE.clear()
+        _AVATAR_RESOLVE_CACHE.clear()
+        _AUTHOR_DISPLAY_ID_CACHE.clear()
+        _INSTANCE_SUMMARY_CACHE.clear()
+        _AVATAR_PERF_CACHE.clear()
+        _FILE_IMAGE_URL_CACHE.clear()
+        _FRIEND_INSTANCE_PLAYERS = {}
+        _CURRENT_USER_CACHE = None
 
 from ..vrc_image_utils import normalize_vrc_image_url, VRCHAT_API
 
@@ -165,239 +162,6 @@ def _avatar_from_api(avatar: Any) -> AvatarResult:
     if perf is not None:
         performance = getattr(perf, 'performance_rating', None) or getattr(perf, 'pc_rating', None)
     return AvatarResult(id=str(getattr(avatar, 'id', '') or ''), name=str(getattr(avatar, 'name', '') or 'Unknown'), description=str(getattr(avatar, 'description', '') or '').strip(), author_name=str(getattr(avatar, 'author_name', '') or ''), image_url=str(getattr(avatar, 'thumbnail_image_url', '') or getattr(avatar, 'image_url', '') or ''), performance=str(performance) if performance else None)
-
-def _platforms_from_avtrdb(item: dict[str, Any]) -> tuple[str, ...]:
-    platforms: list[str] = []
-    perf = item.get('performance') or {}
-    if isinstance(perf, dict):
-        if perf.get('pc_rating'):
-            platforms.append('pc')
-        if perf.get('android_rating') or perf.get('quest_rating'):
-            platforms.append('android')
-        if perf.get('ios_rating'):
-            platforms.append('ios')
-    packages = item.get('platformPackages') or item.get('platform_packages') or []
-    if isinstance(packages, list):
-        for pkg in packages:
-            if not isinstance(pkg, dict):
-                continue
-            plat = str(pkg.get('platform') or '').casefold()
-            if 'android' in plat and 'android' not in platforms:
-                platforms.append('android')
-            elif 'ios' in plat and 'ios' not in platforms:
-                platforms.append('ios')
-            elif plat in ('standalonewindows', 'standalonemac', 'pc') and 'pc' not in platforms:
-                platforms.append('pc')
-    return tuple(platforms)
-
-def _avatar_from_avtrdb(item: dict[str, Any]) -> AvatarResult:
-    perf = item.get('performance') or {}
-    pc_rating = perf.get('pc_rating') if isinstance(perf, dict) else None
-    return AvatarResult(id=str(item.get('id') or ''), name=str(item.get('name') or 'Unknown'), description=str(item.get('description') or '').strip(), author_name=str(item.get('authorName') or ''), image_url=str(item.get('imageUrl') or item.get('thumbnailImageUrl') or ''), performance=str(pc_rating) if pc_rating else None, author_id=str(item.get('authorId') or ''), platforms=_platforms_from_avtrdb(item))
-
-def _vrcx_headers() -> dict[str, str]:
-    return {'User-Agent': VRCX_USER_AGENT, 'Referer': 'https://vrcx.app', 'Accept': 'application/json,*/*'}
-
-def _is_retriable_fetch_error(exc: Exception) -> bool:
-    if isinstance(exc, urllib.error.HTTPError):
-        return exc.code in (418, 404, 421, 521, 522, 523, 525, 526)
-    if isinstance(exc, urllib.error.URLError):
-        reason = exc.reason
-        if isinstance(reason, ssl.SSLError):
-            return True
-        message = str(reason).casefold()
-        return 'wrong version number' in message or 'connection refused' in message or 'timed out' in message
-    if isinstance(exc, (ssl.SSLError, TimeoutError, ConnectionError)):
-        return True
-    return False
-
-def _vrcx_search_urls(base_url: str, query_string: str) -> list[str]:
-    parsed = urllib.parse.urlparse(base_url)
-    host = parsed.hostname or ''
-    path = parsed.path or ''
-    scheme = parsed.scheme or 'https'
-    port = parsed.port
-    joiner = '&' if parsed.query else '?'
-    suffix = f'{path}{joiner}{query_string}'
-    urls: list[str] = []
-    if port:
-        urls.append(f'{scheme}://{host}:{port}{suffix}')
-        return urls
-    urls.append(f'{scheme}://{host}{suffix}')
-    for alt_port in _ALT_HTTPS_PORTS:
-        urls.append(f'{scheme}://{host}:{alt_port}{suffix}')
-    return urls
-
-def _fetch_vrcx_json(url: str) -> list[dict[str, Any]]:
-
-    def _do_fetch() -> list[dict[str, Any]]:
-        request = urllib.request.Request(url, headers=_vrcx_headers())
-        with urllib.request.urlopen(request, timeout=30) as response:
-            payload = json.loads(response.read().decode('utf-8'))
-        if not isinstance(payload, list):
-            return []
-        return [item for item in payload if isinstance(item, dict)]
-    try:
-        return rate_limited_external_call(_do_fetch)
-    except Exception:
-        logger.debug('Avatar search fetch failed for %s', url, exc_info=True)
-        return []
-
-def _fetch_vrcx_avatar_object(url: str, *, timeout: float=12.0) -> dict[str, Any] | None:
-
-    def _do_fetch() -> dict[str, Any] | None:
-        request = urllib.request.Request(url, headers=_vrcx_headers())
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            payload = json.loads(response.read().decode('utf-8'))
-        if isinstance(payload, dict):
-            return payload
-        return None
-    try:
-        return rate_limited_external_call(_do_fetch)
-    except Exception:
-        logger.debug('Avatar lookup fetch failed for %s', url, exc_info=True)
-        return None
-
-def lookup_avatar_by_file_id(base_url: str, file_id: str) -> AvatarResult | None:
-    file_id = file_id.strip()
-    if not file_id:
-        return None
-    params = urllib.parse.urlencode({'fileId': file_id})
-    for url in _vrcx_search_urls(base_url, params):
-        payload = _fetch_vrcx_avatar_object(url)
-        if not payload:
-            continue
-        result = _avatar_from_avtrdb(payload)
-        if result.id.startswith('avtr_'):
-            if url != _vrcx_search_urls(base_url, params)[0]:
-                logger.debug('Avatar fileId lookup succeeded via alternate URL: %s', url)
-            return result
-    return None
-
-def lookup_avatar_by_id_external(avatar_id: str) -> AvatarResult | None:
-    avatar_id = (avatar_id or '').strip()
-    if not avatar_id.startswith('avtr_'):
-        return None
-    params = urllib.parse.urlencode({'search': avatar_id, 'n': '5'})
-    for base_url in _VRCX_AVATAR_PROVIDER_URLS:
-        for url in _vrcx_search_urls(base_url, params):
-            try:
-                items = _fetch_vrcx_json(url)
-            except Exception:
-                continue
-            for item in items:
-                if str(item.get('id') or '').casefold() == avatar_id.casefold():
-                    return _avatar_from_avtrdb(item)
-    return None
-
-def lookup_avatars_by_author(base_url: str, author_id: str) -> list[AvatarResult]:
-    author_id = author_id.strip()
-    if not author_id:
-        return []
-    params = urllib.parse.urlencode({'authorId': author_id})
-    for url in _vrcx_search_urls(base_url, params):
-        items = _fetch_vrcx_json(url)
-        if items:
-            results = [_avatar_from_avtrdb(item) for item in items if item.get('id')]
-            if results:
-                if url != _vrcx_search_urls(base_url, params)[0]:
-                    logger.debug('Avatar author lookup succeeded via alternate URL: %s', url)
-                return results
-    return []
-
-def lookup_avatars_by_author_first_hit(author_id: str) -> list[AvatarResult]:
-    author_id = author_id.strip()
-    if not author_id:
-        return []
-    for base_url in _AUTHOR_LOOKUP_PROVIDER_URLS:
-        results = lookup_avatars_by_author(base_url, author_id)
-        if results:
-            return results
-    return []
-
-def lookup_avatar_id_by_image_file_id(author_id: str, file_id: str) -> str | None:
-    file_id = file_id.strip()
-    if not file_id:
-        return None
-    file_key = file_id.casefold()
-    uuid_key = file_key.replace('file_', '')
-    for base_url in _VRCX_AVATAR_PROVIDER_URLS:
-        match = lookup_avatar_by_file_id(base_url, file_id)
-        if match and match.id.startswith('avtr_'):
-            return match.id
-    author_id = author_id.strip()
-    if not author_id:
-        return None
-    for base_url in _VRCX_AVATAR_PROVIDER_URLS:
-        for result in lookup_avatars_by_author(base_url, author_id):
-            image_url = (result.image_url or '').casefold()
-            if file_key in image_url or (uuid_key and uuid_key in image_url):
-                return result.id
-    return None
-
-def search_avatars_avtrdb(query: str, *, limit: int=40) -> list[AvatarResult]:
-    return search_avatars_vrcx_endpoint('https://api.avtrdb.com/v3/avatar/search/vrcx', query, limit=limit)
-
-def search_avatars_vrcx_endpoint(base_url: str, query: str, *, limit: int=40) -> list[AvatarResult]:
-    query = query.strip()
-    if len(query) < 3:
-        return []
-    params = urllib.parse.urlencode({'search': query, 'n': str(limit)})
-    last_error: Exception | None = None
-    urls = _vrcx_search_urls(base_url, params)
-    for url in urls:
-        try:
-            items = _fetch_vrcx_json(url)
-            results = [_avatar_from_avtrdb(item) for item in items]
-            if url != urls[0]:
-                logger.debug('Avatar search succeeded via alternate URL: %s', url)
-            return results[:limit]
-        except Exception as exc:
-            last_error = exc
-            if _is_retriable_fetch_error(exc):
-                logger.debug('Avatar search retry after %s on %s', type(exc).__name__, url)
-                continue
-            raise
-    if last_error is not None:
-        raise last_error
-    return []
-
-def search_avatars_requi(query: str, *, limit: int=40) -> list[AvatarResult]:
-    query = query.strip()
-    if len(query) < 3:
-        return []
-    param_variants = (urllib.parse.urlencode({'search': query, 'n': str(limit)}), urllib.parse.urlencode({'searchTerm': query, 'limit': str(limit)}))
-    last_error: Exception | None = None
-    for params in param_variants:
-        for url in _vrcx_search_urls(REQUI_SEARCH_BASE, params):
-            try:
-                items = _fetch_vrcx_json(url)
-                return [_avatar_from_avtrdb(item) for item in items][:limit]
-            except Exception as exc:
-                last_error = exc
-                if _is_retriable_fetch_error(exc):
-                    continue
-                raise
-    if last_error is not None:
-        raise last_error
-    return []
-
-def search_avatars_combined(query: str, *, limit: int=40, offset: int=0) -> list[AvatarResult]:
-    query = query.strip()
-    if len(query) < 2:
-        return []
-    merged: dict[str, AvatarResult] = {}
-    sources = (lambda q, n: search_avatars_avtrdb(q, limit=n), lambda q, n: search_avatars_vrcx_endpoint('https://api.avatarrecovery.com/Avatar/vrcx', q, limit=n), lambda q, n: search_avatars_requi(q, limit=n))
-    fetch_count = min(100, max(limit + offset, limit))
-    for search in sources:
-        try:
-            for result in search(query, fetch_count):
-                if result.id and result.id not in merged:
-                    merged[result.id] = result
-        except Exception:
-            logger.debug('Combined avatar search failed for %r', query, exc_info=True)
-    all_results = list(merged.values())
-    return all_results[offset:offset + limit]
 
 def search_avatars_official(session: VRChatSession, *, featured: bool=False, own: bool=False, release_status: str='all', sort: str='updated', limit: int=40) -> list[AvatarResult]:
     with make_api_client(session) as api_client:

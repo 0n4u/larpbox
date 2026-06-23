@@ -17,49 +17,46 @@ class ApiActionWorker(QThread):
         self._timeout_sec = timeout_sec
         self._context = context
         self.cancel = CancelToken()
+        self._timed_out = False
 
     def request_cancel(self) -> None:
         self.cancel.cancel()
 
-    def run(self) -> None:
-        result: dict[str, object | None] = {'value': None, 'error': None, 'cancelled': False}
-        done = threading.Event()
-        debug_event(logger, 'worker start', context=self._context, timeout=self._timeout_sec)
+    def _on_timeout(self) -> None:
+        self._timed_out = True
+        self.cancel.cancel()
 
-        def target() -> None:
-            with action_cancel_scope(self.cancel):
-                try:
-                    result['value'] = self._action()
-                except CancelledError:
-                    result['cancelled'] = True
-                    debug_event(logger, 'worker cancelled', context=self._context)
-                except Exception as exc:
-                    result['error'] = exc
-                    log_exception(logger, self._context, exc)
-                finally:
-                    done.set()
-        thread = threading.Thread(target=target, daemon=True, name=f'larpbox-{self._context[:24]}')
-        thread.start()
-        timed_out = False
+    def run(self) -> None:
+        debug_event(logger, 'worker start', context=self._context, timeout=self._timeout_sec)
+        timer: threading.Timer | None = None
         if self._timeout_sec is not None:
-            if not done.wait(timeout=self._timeout_sec):
-                timed_out = True
-                self.cancel.cancel()
-                done.wait()
-        else:
-            done.wait()
-        if timed_out:
+            timer = threading.Timer(self._timeout_sec, self._on_timeout)
+            timer.daemon = True
+            timer.start()
+        try:
+            with action_cancel_scope(self.cancel):
+                value = self._action()
+        except CancelledError:
+            if self._timed_out:
+                logger.warning('[%s] timed out after %.1fs', self._context, self._timeout_sec or 0)
+                self.finished_error.emit('Request timed out — try again or join their instance.')
+            else:
+                debug_event(logger, 'worker cancelled', context=self._context)
+                self.finished_cancelled.emit()
+            return
+        except Exception as exc:
+            log_exception(logger, self._context, exc)
+            self.finished_error.emit(str(exc) or 'Request failed.')
+            return
+        finally:
+            if timer is not None:
+                timer.cancel()
+        if self._timed_out:
             logger.warning('[%s] timed out after %.1fs', self._context, self._timeout_sec or 0)
             self.finished_error.emit('Request timed out — try again or join their instance.')
             return
-        if self.cancel.is_cancelled or result['cancelled']:
-            if not timed_out:
-                self.finished_cancelled.emit()
+        if self.cancel.is_cancelled:
+            self.finished_cancelled.emit()
             return
-        error = result['error']
-        if error is not None:
-            self.finished_error.emit(str(error) or 'Request failed.')
-            return
-        message = result['value']
         debug_event(logger, 'worker ok', context=self._context)
-        self.finished_ok.emit(str(message) if message else self._success_message)
+        self.finished_ok.emit(str(value) if value else self._success_message)

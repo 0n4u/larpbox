@@ -1,8 +1,8 @@
 from pathlib import Path
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import QApplication, QFileDialog, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSizePolicy, QTextEdit, QVBoxLayout, QWidget
 from .chatbox_preview import ChatboxPreview
-from .config import get_bool, load_config, save_config
+from .config import get_bool, load_config
 from .logging_setup import get_logger
 from .title_bar import TitleBar
 from .media_monitor import MediaIntegration
@@ -19,7 +19,7 @@ from .status_text import format_status_label
 from .theme import dark_theme, TOOLBAR_BUTTON, themed_menu
 from .frameless_chrome import apply_frameless_chrome
 from .image_loader import RemoteImageLabel
-from .ui_animations import flash_widget, pop_in_widget, pulse_widget, window_fade_in
+from .ui_animations import flash_widget, pop_in_widget, window_fade_in
 from .services.errors import ErrorBus
 from .services.rich_presence import RichPresenceManager
 from .services.session_manager import SessionManager
@@ -192,7 +192,11 @@ class PresetConfigUI(QWidget):
         top_bar.addWidget(settings)
         self.preset_search = QLineEdit()
         self.preset_search.setPlaceholderText('Search presets…')
-        self.preset_search.textChanged.connect(self._filter_preset_list)
+        self._preset_filter_timer = QTimer(self)
+        self._preset_filter_timer.setSingleShot(True)
+        self._preset_filter_timer.setInterval(180)
+        self._preset_filter_timer.timeout.connect(self._filter_preset_list)
+        self.preset_search.textChanged.connect(lambda: self._preset_filter_timer.start())
         self.preset_list = QListWidget()
         self.preset_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.preset_list.customContextMenuRequested.connect(self._preset_context_menu)
@@ -367,6 +371,13 @@ class PresetConfigUI(QWidget):
 
     def _on_osc_status_changed(self, _healthy: bool, _message: str) -> None:
         self._apply_osc_status_dot()
+
+    def show_friends_with_filter(self, filter_id: str) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        if hasattr(self, 'friends_list'):
+            self.friends_list.apply_filter(filter_id)
 
     def play_hotkey_preset(self, slot: int) -> None:
         preset_name = HotkeyManager.instance().preset_for_slot(slot)

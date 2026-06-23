@@ -1,6 +1,5 @@
 from __future__ import annotations
 import json
-from pathlib import Path
 from .config import CONFIG_PATH, DEFAULT_CONFIG, PROJECT_ROOT, write_config
 _LOGS_DIR = PROJECT_ROOT / 'logs'
 _AVATAR_CACHE_PATH = PROJECT_ROOT / 'data' / 'avatar_cache.json'
@@ -16,7 +15,12 @@ def reset_app_data(*, debug: bool=False) -> list[str]:
     actions: list[str] = []
     config = build_default_config(debug=debug)
     write_config(config)
-    actions.append(f"Reset settings and cleared login ({CONFIG_PATH.name}, debug_mode={config['debug_mode']})")
+    actions.append(f"Reset settings ({CONFIG_PATH.name}, debug_mode={config['debug_mode']})")
+    from .secret_store import SECRETS_PATH, clear_secrets
+    had_secrets = SECRETS_PATH.is_file()
+    clear_secrets()
+    if had_secrets:
+        actions.append('Cleared saved login credentials')
     if _AVATAR_CACHE_PATH.is_file():
         _AVATAR_CACHE_PATH.unlink()
         actions.append(f'Deleted avatar cache ({_AVATAR_CACHE_PATH.relative_to(PROJECT_ROOT)})')
@@ -25,6 +29,14 @@ def reset_app_data(*, debug: bool=False) -> list[str]:
     if _WARDROBE_CACHE_PATH.is_file():
         _WARDROBE_CACHE_PATH.unlink()
         actions.append(f'Deleted wardrobe cache ({_WARDROBE_CACHE_PATH.relative_to(PROJECT_ROOT)})')
+    try:
+        from .image_cache import cache_root, clear_image_cache
+        had_image_cache = cache_root().is_dir()
+        clear_image_cache()
+        if had_image_cache:
+            actions.append('Cleared image cache (ImageCache/)')
+    except Exception:
+        pass
     if _LOGS_DIR.is_dir():
         cleared_logs = 0
         for log_file in _LOGS_DIR.glob('*.log'):
@@ -66,10 +78,11 @@ def config_is_fresh(*, debug: bool=False) -> bool:
     if not isinstance(stored, dict):
         return False
     expected = build_default_config(debug=debug)
-    auth_keys = ('auth_token', 'two_factor_token', 'auth_username', 'auth_display_name', 'auth_user_id', 'remember_login')
-    for key in auth_keys:
-        if str(stored.get(key, '')) != str(expected.get(key, '')):
-            return False
+    if bool(stored.get('remember_login')) != bool(expected.get('remember_login')):
+        return False
+    from .secret_store import has_secrets
+    if has_secrets():
+        return False
     if bool(stored.get('debug_mode')) != bool(expected.get('debug_mode')):
         return False
     return not _AVATAR_CACHE_PATH.is_file() and not _WARDROBE_CACHE_PATH.is_file()

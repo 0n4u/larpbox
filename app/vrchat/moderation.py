@@ -1,6 +1,5 @@
 from __future__ import annotations
 import json
-import vrchatapi
 from vrchatapi.api import friends_api, instances_api, playermoderation_api, users_api
 from vrchatapi.exceptions import ApiException, UnauthorizedException
 from vrchatapi.models.moderate_user_request import ModerateUserRequest

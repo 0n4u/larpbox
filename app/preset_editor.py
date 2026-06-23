@@ -1,6 +1,6 @@
 from __future__ import annotations
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import QGroupBox, QHBoxLayout, QInputDialog, QLabel, QListWidget, QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QGroupBox, QHBoxLayout, QInputDialog, QLabel, QListWidget, QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
 from .frameless_chrome import apply_frameless_chrome
 from .preset_storage import load_presets, save_presets
 from .theme import dark_theme

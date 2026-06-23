@@ -8,6 +8,17 @@ logger = get_logger('vrchat_amplitude')
 _AVTR_RE = re.compile('avtr_[a-f0-9-]{36}', re.IGNORECASE)
 _USR_RE = re.compile('usr_[a-f0-9-]{36}', re.IGNORECASE)
 _PAIR_RE = re.compile('"(?:userId|user_id)"\\s*:\\s*"(usr_[^"]+)"[\\s\\S]{0,800}?"(?:avatarId|avatar_id)"\\s*:\\s*"(avtr_[^"]+)"', re.IGNORECASE)
+_AMPLITUDE_CACHE: tuple[tuple, dict[str, str]] | None = None
+
+def _amplitude_signature(paths: list[Path]) -> tuple:
+    signature: list[tuple[str, float, int]] = []
+    for path in paths:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        signature.append((str(path), stat.st_mtime, stat.st_size))
+    return tuple(signature)
 
 def _amplitude_paths() -> list[Path]:
     paths: list[Path] = []
@@ -23,9 +34,14 @@ def _amplitude_paths() -> list[Path]:
     return paths
 
 def build_user_avatar_map_from_amplitude() -> dict[str, str]:
+    global _AMPLITUDE_CACHE
     try:
+        paths = _amplitude_paths()
+        signature = _amplitude_signature(paths)
+        if _AMPLITUDE_CACHE is not None and _AMPLITUDE_CACHE[0] == signature:
+            return dict(_AMPLITUDE_CACHE[1])
         mapping: dict[str, str] = {}
-        for path in _amplitude_paths():
+        for path in paths:
             try:
                 text = path.read_text(encoding='utf-8', errors='replace')
             except OSError:
@@ -49,7 +65,8 @@ def build_user_avatar_map_from_amplitude() -> dict[str, str]:
             elif isinstance(payload, dict):
                 for user_id, avatar_id in _PAIR_RE.findall(json.dumps(payload)):
                     mapping[user_id] = avatar_id
-        return mapping
+        _AMPLITUDE_CACHE = (signature, mapping)
+        return dict(mapping)
     except Exception as e:
         logger = get_logger('amplitude')
         logger.warning('Failed to build user avatar map from amplitude: %s', e, exc_info=True)

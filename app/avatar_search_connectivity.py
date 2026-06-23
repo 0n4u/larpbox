@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import urllib.error
 import urllib.request
 from .logging_setup import get_logger
-from .vrchat_api import AvatarResult, VRCX_USER_AGENT
+from .vrchat_api import AvatarResult, PROVIDER_USER_AGENT
 logger = get_logger('avatar_search_connectivity')
 _ALT_HTTPS_PORTS = (2053, 8443)
 
@@ -69,7 +69,7 @@ def probe_provider_search(provider_id: str, label: str, search_fn: Callable[...,
         return ProviderProbeResult(provider_id, label, False, False, detail)
 
 def _probe_api_url(url: str) -> tuple[bool, str]:
-    req = urllib.request.Request(url, headers={'User-Agent': VRCX_USER_AGENT, 'Referer': 'https://vrcx.app', 'Accept': 'application/json,*/*'})
+    req = urllib.request.Request(url, headers={'User-Agent': PROVIDER_USER_AGENT, 'Accept': 'application/json,*/*'})
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             body = resp.read(400)

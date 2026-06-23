@@ -2,6 +2,7 @@ from __future__ import annotations
 import json
 from json import JSONDecodeError
 from pathlib import Path
+from .atomic_io import atomic_write_text
 from .config import PROJECT_ROOT
 PRESETS_PATH = PROJECT_ROOT / 'presets.json'
 ALIASES_PATH = PROJECT_ROOT / 'app' / 'preset_aliases.json'
@@ -114,8 +115,7 @@ def load_presets(path: Path | None=None) -> dict[str, list]:
 
 def save_presets(presets: dict, path: Path | None=None) -> None:
     presets_path = path or PRESETS_PATH
-    with open(presets_path, 'w', encoding='utf-8') as f:
-        json.dump(presets, f, indent=4, ensure_ascii=False)
+    atomic_write_text(presets_path, json.dumps(presets, indent=4, ensure_ascii=False))
     if presets_path == PRESETS_PATH:
         global _PRESETS_CACHE
         _PRESETS_CACHE = presets

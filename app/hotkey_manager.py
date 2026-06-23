@@ -2,7 +2,7 @@ from __future__ import annotations
 import sys
 from PyQt6.QtCore import QAbstractNativeEventFilter, QAbstractEventDispatcher, QObject, pyqtSignal
 from PyQt6.QtWidgets import QApplication
-from .config import get_bool, load_config
+from .config import get_bool, load_config_cached
 from .logging_setup import get_logger
 
 logger = get_logger('hotkeys')
@@ -26,7 +26,6 @@ class _HotkeyNativeFilter(QAbstractNativeEventFilter):
         if eventType != b'windows_generic_MSG':
             return False, 0
         try:
-            import ctypes
             from ctypes import wintypes
             msg = wintypes.MSG.from_address(int(message))
         except Exception:
@@ -78,9 +77,9 @@ class HotkeyManager(QObject):
         self.unregister_all()
         if sys.platform != 'win32':
             return
-        if not get_bool(load_config().get('enable_hotkeys', True)):
+        config = load_config_cached()
+        if not get_bool(config.get('enable_hotkeys', True)):
             return
-        config = load_config()
         for slot in range(_SLOT_COUNT):
             preset = str(config.get(f'hotkey_preset_{slot + 1}', '') or '').strip()
             if preset:
@@ -89,7 +88,7 @@ class HotkeyManager(QObject):
     def preset_for_slot(self, slot: int) -> str:
         if slot < 0 or slot >= _SLOT_COUNT:
             return ''
-        return str(load_config().get(f'hotkey_preset_{slot + 1}', '') or '').strip()
+        return str(load_config_cached().get(f'hotkey_preset_{slot + 1}', '') or '').strip()
 
     def _register_slot(self, slot: int) -> None:
         try:
@@ -121,7 +120,7 @@ class HotkeyManager(QObject):
         self._registered.clear()
 
     def _on_hotkey(self, slot: int) -> None:
-        if not get_bool(load_config().get('enable_hotkeys', True)):
+        if not get_bool(load_config_cached().get('enable_hotkeys', True)):
             return
         preset = self.preset_for_slot(slot)
         if not preset:

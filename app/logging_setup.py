@@ -1,11 +1,13 @@
 from __future__ import annotations
 import ctypes
-import io
 import logging
 import sys
 import traceback
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
+_LOG_MAX_BYTES = 5 * 1024 * 1024
+_LOG_BACKUP_COUNT = 3
 _DEBUG_MODE = False
 _LOG_FILE: Path | None = None
 
@@ -135,7 +137,7 @@ def setup_logging(debug_mode: bool=False, log_file: str | Path | None=None) -> P
     for handler in list(root.handlers):
         if getattr(handler, '_larpbox_handler', False):
             root.removeHandler(handler)
-    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    file_handler = RotatingFileHandler(log_file, maxBytes=_LOG_MAX_BYTES, backupCount=_LOG_BACKUP_COUNT, encoding='utf-8')
     file_handler.setLevel(level)
     file_handler.setFormatter(_PlainFormatter())
     file_handler._larpbox_handler = True

@@ -9,11 +9,12 @@ from vrchatapi.exceptions import ApiException, UnauthorizedException
 from vrchatapi.models.two_factor_auth_code import TwoFactorAuthCode
 from vrchatapi.models.two_factor_email_code import TwoFactorEmailCode
 from .api_rate_limit import rate_limited_vrchat_call
-from .config import clear_auth_session, get_bool, load_config, save_auth_session
+from .config import clear_auth_session, load_auth_session, migrate_legacy_auth, save_auth_session
 from .logging_setup import get_logger
-from .services.auth_errors import AuthSessionError, api_error_text, auth_session_error_from_api
+from .services.auth_errors import AuthSessionError, api_error_text, auth_session_error_from_api, is_auth_failure, is_rate_limit_error
+from .version import __version__
 logger = get_logger('auth')
-USER_AGENT = 'VRCX/2024.1.0'
+USER_AGENT = f'larpbox/{__version__}'
 TWO_FACTOR_TOTP = '2 Factor Authentication'
 TWO_FACTOR_EMAIL = 'Email 2 Factor Authentication'
 
@@ -84,7 +85,6 @@ def _make_vrchat_cookie(name: str, value: str) -> Cookie:
 
 def _configure_api_client(api_client: vrchatapi.ApiClient, *, auth_token: str | None=None, two_factor_token: str | None=None) -> None:
     api_client.user_agent = USER_AGENT
-    api_client.default_headers['Referer'] = 'https://vrcx.app'
     api_client.default_headers['Accept'] = 'application/json'
     api_client.configuration.api_key.pop('authCookie', None)
     api_client.configuration.api_key.pop('twoFactorAuthCookie', None)
@@ -192,26 +192,29 @@ def login(username: str, password: str, two_factor_code: str | None=None, two_fa
     return session
 
 def restore_session() -> VRChatSession | None:
-    config = load_config()
-    if not get_bool(config.get('remember_login')):
+    migrate_legacy_auth()
+    auth = load_auth_session()
+    if not auth.get('remember_login'):
         return None
-    auth_token = str(config.get('auth_token') or '').strip()
+    auth_token = str(auth.get('auth_token') or '').strip()
     if not auth_token:
         logger.debug('Remember me enabled but no auth token stored')
         return None
-    username = str(config.get('auth_username') or 'VRChat User')
-    two_factor_token = str(config.get('two_factor_token') or '').strip() or None
-    seed = VRChatSession(user_id=str(config.get('auth_user_id') or ''), display_name=str(config.get('auth_display_name') or username), username=username, auth_token=auth_token, two_factor_token=two_factor_token)
+    username = str(auth.get('auth_username') or 'VRChat User')
+    two_factor_token = str(auth.get('two_factor_token') or '').strip() or None
+    seed = VRChatSession(user_id=str(auth.get('auth_user_id') or ''), display_name=str(auth.get('auth_display_name') or username), username=username, auth_token=auth_token, two_factor_token=two_factor_token)
     try:
         session = verify_session(seed)
     except AuthSessionError as exc:
-        logger.warning('Saved VRChat session invalid (%s) — login required', exc)
-        clear_auth_session()
-        return None
-    except Exception as exc:
-        logger.warning('Could not restore VRChat session — login required', exc_info=True)
-        clear_auth_session()
-        return None
+        if is_auth_failure(exc) and (not is_rate_limit_error(exc)):
+            logger.warning('Saved VRChat session invalid (%s) — login required', exc)
+            clear_auth_session()
+            return None
+        logger.warning('Could not verify saved VRChat session (%s) — using saved login; will retry', exc)
+        return seed
+    except Exception:
+        logger.warning('Could not verify saved VRChat session — using saved login; will retry', exc_info=True)
+        return seed
     save_auth_session(auth_token=session.auth_token, two_factor_token=session.two_factor_token, username=session.username, display_name=session.display_name, user_id=session.user_id, remember_login=True)
     logger.info('Restored session for %s', session.display_name)
     return session

@@ -4,6 +4,7 @@ import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
+from .atomic_io import atomic_write_bytes
 from .config import PROJECT_ROOT
 from .logging_setup import get_logger
 from .vrc_image_utils import is_allowed_image_host, parse_vrc_image_url
@@ -48,7 +49,7 @@ def save_image_bytes_to_cache(url: str, data: bytes) -> Path | None:
     directory = destination.parent
     directory.mkdir(parents=True, exist_ok=True)
     try:
-        destination.write_bytes(data)
+        atomic_write_bytes(destination, data)
         directory.touch()
         _maybe_clean_cache()
         return destination

@@ -1,7 +1,7 @@
 from __future__ import annotations
 from PyQt6.QtCore import QObject, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QWidget
-from ..config import clear_auth_session, save_auth_session
+from ..config import clear_auth_session, get_bool, load_config, save_auth_session
 from ..logging_setup import get_logger
 from ..vrchat_auth import VRChatSession, verify_session
 from .auth_errors import AuthSessionError, is_auth_failure, is_rate_limit_error
@@ -113,7 +113,6 @@ class SessionManager(QObject):
         if window is None:
             return
         from PyQt6.QtCore import QTimer
-        from ..config import get_bool, load_config
 
         def _refresh_panels() -> None:
             if hasattr(window, 'friends_list'):
@@ -189,7 +188,7 @@ class SessionManager(QObject):
                     )
                 self.session_updated.emit(result)
             return
-        if isinstance(result, AuthSessionError) and (not is_rate_limit_error(result)):
+        if is_auth_failure(result) and (not is_rate_limit_error(result)):
             self.request_relogin(str(result))
         elif isinstance(result, Exception):
             from .errors import ErrorBus
