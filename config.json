@@ -1,0 +1,96 @@
+{
+    "osc_ip": "127.0.0.1",
+    "osc_port": 9000,
+    "insane_egg_mode": false,
+    "wall_of_china": false,
+    "egg_mode": true,
+    "use_secondary_osc": false,
+    "secondary_osc_ip": "127.0.0.1",
+    "secondary_osc_port": 9001,
+    "small_delay_time": 1500,
+    "message_interval": 1500,
+    "blank_message_interval": 1500,
+    "idle_tiny_char": "U+2060",
+    "enable_media": false,
+    "media_format": "{title} by {artist}",
+    "media_allowed_apps": [],
+    "debug_mode": false,
+    "show_friends_list": true,
+    "show_avatar_search": true,
+    "show_player_list": true,
+    "show_account_info": true,
+    "show_chatbox_preview": true,
+    "show_preset_config": true,
+    "show_instance_info": true,
+    "enable_notifications": true,
+    "enable_discord_presence": false,
+    "discord_client_id": "",
+    "avatar_search_provider": "avtrdb",
+    "avatar_search_filter": "all",
+    "http_proxy": "",
+    "friend_filter": "all",
+    "friend_groups": {},
+    "preset_favorites": [],
+    "preset_recents": [],
+    "close_to_tray": true,
+    "enable_hotkeys": true,
+    "hotkey_preset_1": "",
+    "hotkey_preset_2": "",
+    "hotkey_preset_3": "",
+    "hotkey_preset_4": "",
+    "hotkey_preset_5": "",
+    "remember_login": false,
+    "enable_activity_log": true,
+    "enable_pipeline": false,
+    "enable_analytics": true,
+    "enable_vr_overlay": false,
+    "enable_multi_account": false,
+    "show_activity_feed": true,
+    "show_notification_center": true,
+    "show_dashboard": true,
+    "dashboard_layout": [
+        {
+            "name": "Overview",
+            "widgets": [
+                "playtime",
+                "recent_activity",
+                "notifications",
+                "favorites"
+            ]
+        },
+        {
+            "name": "Worlds",
+            "widgets": [
+                "recent_worlds",
+                "media"
+            ]
+        }
+    ],
+    "show_world_tools": true,
+    "status_presets": [
+        {
+            "label": "Available",
+            "status": "join me",
+            "description": "Come hang out"
+        },
+        {
+            "label": "Chilling",
+            "status": "active",
+            "description": ""
+        },
+        {
+            "label": "Focusing",
+            "status": "ask me",
+            "description": "Ask before joining"
+        },
+        {
+            "label": "Away",
+            "status": "busy",
+            "description": "AFK"
+        }
+    ],
+    "launch_on_startup": false,
+    "enable_server_status": true,
+    "auto_restart_on_crash": false,
+    "reduce_motion": true
+}
